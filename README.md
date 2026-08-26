@@ -10,6 +10,8 @@ Cursor's agent does not get `input_tokens` / `output_tokens` in its prompt, so a
 
 This is not an official Cursor product.
 
+![Cursor Token HUD showing the selected chat, input 204,140 / 256,000, and a per-bucket breakdown](screenshot.png)
+
 ## What the numbers mean
 
 | You see | What it is |
@@ -67,8 +69,6 @@ On Windows you can also drop `start.vbs` in the Startup folder, and keep a Deskt
 
 CLI `total_output_tokens` is often null. Same limitation as the HUD: billed output is not a local number.
 
-## Credits
+## Notes
 
-The request came from [Ahmi Altaay](https://github.com/aaltaay): show token use in front of you, on every chat, without opening a website.
-
-The implementation reads Cursor's existing local fields (`promptTokenBreakdown`, `contextTokensUsed`, `cursor/glass.selectedAgent`). Cursor's own context ring in the agent panel is the official UI for the same input snapshot.
+This repo is a personal tool. It reads Cursor's existing local fields (`promptTokenBreakdown`, `contextTokensUsed`, `cursor/glass.selectedAgent`). Cursor's own context ring in the agent panel is the official UI for the same input snapshot.
