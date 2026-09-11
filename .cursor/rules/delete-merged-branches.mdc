@@ -1,0 +1,18 @@
+---
+description: After every merge or PR close, delete the head branch the same session.
+alwaysApply: true
+---
+
+# Delete merged branches
+
+Hard rule. Do not wait for the user to ask.
+
+After a pull request is merged or closed, finish delivery in the same session:
+
+1. Prefer `gh pr merge --delete-branch`.
+2. If origin still has the head: `git push origin --delete <head-branch>`.
+3. Delete the local head (`git branch -d` / `-D` if already merged).
+4. `git fetch origin --prune`.
+5. Confirm the head is gone. A merged PR whose branch is still on origin is unfinished.
+
+Never delete `main`. Never delete a branch that still has an open PR.
