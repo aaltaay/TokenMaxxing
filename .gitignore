@@ -4,3 +4,10 @@ __pycache__/
 .env.*
 .DS_Store
 *.lnk
+_probe*.py
+_fetch*.py
+_analyze*.py
+_attr*.py
+_lookup*.py
+_usage_*.json
+cycle-cache.json
