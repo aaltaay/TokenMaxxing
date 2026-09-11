@@ -1,0 +1,52 @@
+name: Bug
+description: Report incorrect HUD behavior with reproducible evidence.
+title: "Bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Do not include Cursor session tokens, cookies, or full `.env` contents.
+  - type: textarea
+    id: symptom
+    attributes:
+      label: Symptom
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction and evidence
+      description: Exact steps, timestamps, logs, or screenshots. Redact session tokens.
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Proposed priority
+      options:
+        - P0 - outage or data-loss class
+        - P1 - operator blocker
+        - P2 - normal defect
+        - P3 - minor defect
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable checks that must pass before this issue can close.
+      placeholder: |
+        - [ ] Regression reproduced and fixed
+        - [ ] HUD still launches as a single instance
+        - [ ] Cycle fetch still works when signed into Cursor
+    validations:
+      required: true
+  - type: textarea
+    id: relationships
+    attributes:
+      label: Relationships and blockers
+      description: Parent, sub-issue, blocked-by, duplicate, or related issue numbers. Write "none" when there is no real relationship.
+    validations:
+      required: true

@@ -1,0 +1,49 @@
+name: Feature
+description: Propose a HUD capability with explicit scope and acceptance criteria.
+title: "Feature: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: Who needs this and what outcome is missing?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals
+      description: State what this feature includes and deliberately excludes.
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Proposed priority
+      options:
+        - P0 - outage or data-loss class
+        - P1 - operator blocker
+        - P2 - normal product work
+        - P3 - low-priority enhancement
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable checks that must pass before this issue can close.
+      placeholder: |
+        - [ ] Behavior implemented
+        - [ ] Commands and HUD launch verified
+        - [ ] README matches the shipped behavior
+    validations:
+      required: true
+  - type: textarea
+    id: relationships
+    attributes:
+      label: Relationships and blockers
+      description: Parent, sub-issue, blocked-by, duplicate, or related issue numbers. Write "none" when there is no real relationship.
+    validations:
+      required: true
