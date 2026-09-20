@@ -50,7 +50,7 @@ _lock_sock = None
 BG = "#1c1c1e"
 CARD = "#2c2c2e"
 CARD_HI = "#3a3a3c"
-SEG_ON = "#48484a"
+SEG_ON = "#5c5c5e"
 SEP = "#38383a"
 TRACK = "#3a3a3c"
 FG = "#f5f5f7"
@@ -70,7 +70,7 @@ PAD = 20
 GAP = 12
 INSET = 14
 WIN_W = 640
-WIN_H = 880
+WIN_H = 920
 WIN_MIN_W = 580
 WIN_MIN_H = 720
 
@@ -192,16 +192,15 @@ class ThinMeter(tk.Canvas):
 
 class StatusPill(tk.Label):
     _LABELS = {"ok": "OK", "soon": "Soon", "now": "Now", "off": "Off"}
+    _CHIP = {"ok": "#163226", "soon": "#3a2a12", "now": "#3a1618", "off": CARD_HI}
 
     def __init__(self, parent: tk.Misc, fonts: Fonts, bg: str = CARD) -> None:
-        super().__init__(parent, text="OK", bg=bg, fg=OK, font=fonts.pill, padx=8, pady=2)
-        self._surface = bg
+        super().__init__(parent, text="OK", bg=self._CHIP["ok"], fg=OK, font=fonts.pill, padx=9, pady=3)
         self.set("ok")
 
     def set(self, kind: str) -> None:
         kind = kind if kind in self._LABELS else "ok"
-        color = kind_color(kind)
-        self.configure(text=self._LABELS[kind], fg=color, bg=self._surface)
+        self.configure(text=self._LABELS[kind], fg=kind_color(kind), bg=self._CHIP[kind])
 
 
 class SegmentedNotebook:
@@ -226,12 +225,14 @@ class SegmentedNotebook:
         cell.pack(side="left", fill="both", expand=True, padx=2, pady=2)
         btn = tk.Label(cell, text=text.strip(), bg=CARD, fg=FG2, font=self._fonts.segment, pady=7)
         btn.pack(fill="both", expand=True)
+        rule = tk.Frame(cell, bg=CARD, height=2)
+        rule.pack(fill="x", side="bottom")
         btn.bind("<Button-1>", lambda _e, i=idx: self.select(i))
         cell.bind("<Button-1>", lambda _e, i=idx: self.select(i))
         btn.bind("<Enter>", lambda _e, i=idx: self._hover(i, True))
         btn.bind("<Leave>", lambda _e, i=idx: self._hover(i, False))
         frame.configure(bg=BG)
-        self._items.append({"frame": frame, "text": text, "btn": btn, "cell": cell})
+        self._items.append({"frame": frame, "text": text, "btn": btn, "cell": cell, "rule": rule})
         if self._current is None:
             self.select(0)
 
@@ -253,6 +254,7 @@ class SegmentedNotebook:
             fg = FG if on else FG2
             item["btn"].configure(bg=bg, fg=fg)
             item["cell"].configure(bg=bg)
+            item["rule"].configure(bg=ACCENT if on else bg)
             if on:
                 item["frame"].pack(in_=self.body, fill="both", expand=True)
             else:
@@ -284,7 +286,7 @@ class ProviderCard(tk.Frame):
         self._summary = ""
         self.soonest = 10**9
         head = tk.Frame(self, bg=CARD)
-        head.pack(fill="x", padx=INSET, pady=(12, 8))
+        head.pack(fill="x", padx=INSET, pady=(10, 4))
         tk.Label(head, text=title, bg=CARD, fg=FG, font=fonts.section, anchor="w").pack(side="left")
         self.pill = StatusPill(head, fonts, bg=CARD)
         self.pill.pack(side="right")
@@ -292,7 +294,7 @@ class ProviderCard(tk.Frame):
         hairline(self, padx=INSET)
         self.weekly = self._clock(self, "Weekly")
         btn_row = tk.Frame(self, bg=CARD)
-        btn_row.pack(fill="x", padx=INSET, pady=(10, 12))
+        btn_row.pack(fill="x", padx=INSET, pady=(6, 10))
         make_action(btn_row, "Mark session now", on_mark, fonts=fonts).pack(side="left")
 
     def cget(self, key):
@@ -346,7 +348,7 @@ class ProviderCard(tk.Frame):
 
     def _clock(self, parent: tk.Misc, title: str) -> dict:
         wrap = tk.Frame(parent, bg=CARD)
-        wrap.pack(fill="x", padx=INSET, pady=(2, 8))
+        wrap.pack(fill="x", padx=INSET, pady=(0, 6))
         top = tk.Frame(wrap, bg=CARD)
         top.pack(fill="x")
         tk.Label(top, text=title, bg=CARD, fg=FG2, font=self._fonts.caption, anchor="w").pack(side="left")
@@ -434,11 +436,6 @@ class VerticalScroll(tk.Frame):
 
     def _set_scroll(self, first, last) -> None:
         self.vsb.set(first, last)
-        if float(first) <= 0.0 and float(last) >= 1.0:
-            self.vsb.pack_forget()
-        else:
-            if not self.vsb.winfo_ismapped():
-                self.vsb.pack(side="right", fill="y")
 
     def _bind_wheel(self, on: bool) -> None:
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
@@ -455,6 +452,88 @@ class VerticalScroll(tk.Frame):
         return "break"
 
 
+class SimpleTable(tk.Frame):
+    """Quiet column list. Same insert/delete/heading hooks apply_billing already uses."""
+
+    def __init__(self, parent: tk.Misc, columns: tuple[str, ...], widths: dict, fonts: Fonts) -> None:
+        super().__init__(parent, bg=CARD)
+        self.columns = columns
+        self.widths = widths
+        self.fonts = fonts
+        self._head_text = {c: c for c in columns}
+        self._rows: list[tuple] = []
+        self._head = tk.Frame(self, bg=CARD_HI)
+        self._head.pack(fill="x")
+        self._body = tk.Frame(self, bg=CARD)
+        self._body.pack(fill="x")
+        self._render_head()
+
+    def heading(self, col, text=None, **_kw) -> None:
+        if text is not None:
+            self._head_text[col] = text
+            self._render_head()
+
+    def column(self, col, **kw) -> None:
+        if "width" in kw:
+            self.widths[col] = kw["width"]
+
+    def get_children(self) -> tuple[str, ...]:
+        return tuple(str(i) for i in range(len(self._rows)))
+
+    def delete(self, *items) -> None:
+        if not items:
+            return
+        drop = {str(x) for x in items}
+        self._rows = [row for i, row in enumerate(self._rows) if str(i) not in drop]
+        self._render_rows()
+
+    def insert(self, _parent, _index, values=()) -> str:
+        self._rows.append(tuple(values))
+        self._render_rows()
+        return str(len(self._rows) - 1)
+
+    def _stretch(self, col: str) -> int:
+        return 1 if col in ("name", "model") else 0
+
+    def _render_head(self) -> None:
+        for child in self._head.winfo_children():
+            child.destroy()
+        for i, col in enumerate(self.columns):
+            tk.Label(
+                self._head,
+                text=self._head_text[col],
+                bg=CARD_HI,
+                fg=FG3,
+                font=self.fonts.micro,
+                anchor="w",
+            ).grid(row=0, column=i, sticky="ew", padx=8, pady=6)
+            self._head.grid_columnconfigure(i, weight=self._stretch(col), minsize=min(self.widths.get(col, 60), 90))
+
+    def _render_rows(self) -> None:
+        for child in self._body.winfo_children():
+            child.destroy()
+        if not self._rows:
+            tk.Label(self._body, text="No rows yet", bg=CARD, fg=FG3, font=self.fonts.caption, anchor="w").pack(
+                fill="x", padx=8, pady=10
+            )
+            return
+        for r, values in enumerate(self._rows):
+            row_bg = CARD if r % 2 == 0 else "#323234"
+            fr = tk.Frame(self._body, bg=row_bg)
+            fr.pack(fill="x")
+            for i, col in enumerate(self.columns):
+                val = values[i] if i < len(values) else ""
+                tk.Label(
+                    fr,
+                    text=str(val),
+                    bg=row_bg,
+                    fg=FG,
+                    font=self.fonts.mono_sm,
+                    anchor="w",
+                ).grid(row=0, column=i, sticky="ew", padx=8, pady=5)
+                fr.grid_columnconfigure(i, weight=self._stretch(col), minsize=min(self.widths.get(col, 60), 90))
+
+
 class TokenHud:
     def __init__(self) -> None:
         self.pinned: str | None = None
@@ -468,6 +547,9 @@ class TokenHud:
         self._banner_gen = 0
         self._flash_n = 0
         self._wrap = 560
+        self._alive = True
+        self._pause_local = False
+        self._after_ids: list = []
 
         self.root = tk.Tk()
         self.root.title("Token HUD")
@@ -476,6 +558,10 @@ class TokenHud:
         self.root.resizable(True, True)
         self.root.minsize(WIN_MIN_W, WIN_MIN_H)
         self.root.geometry(f"{WIN_W}x{WIN_H}+40+60")
+        self._tk_destroy = self.root.destroy
+        self.root.destroy = self._destroy
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.bind("<Destroy>", self._on_destroy)
         self.f = Fonts(self.root)
         self._style()
 
@@ -511,7 +597,7 @@ class TokenHud:
         self.header_status = tk.Label(self.header, text="", bg=BG, fg=FG2, anchor="w", font=self.f.body)
         self.header_status.pack(fill="x", pady=(2, 10))
 
-        self.meter_api = self._header_meter("Other Models", "the 75%")
+        self.meter_api = self._header_meter("Other Models", "named / API")
         self.meter_auto = self._header_meter("Cursor Models", "Grok / Composer")
         self.header_note = tk.Label(
             self.header, text="", bg=BG, fg=FG3, anchor="w", font=self.f.micro, wraplength=560, justify="left"
@@ -535,8 +621,48 @@ class TokenHud:
         self.root.bind("<Control-Key-2>", lambda _e: self.nb.select(1))
         self.root.bind("<Control-Key-3>", lambda _e: self.nb.select(2))
         self.refresh_local()
-        self.root.after(200, self._billing_tick)
-        self.root.after(400, self._reset_tick)
+        self._after(200, self._billing_tick)
+        self._after(400, self._reset_tick)
+
+    def _cancel_afters(self) -> None:
+        self._alive = False
+        for aid in list(self._after_ids):
+            try:
+                self.root.after_cancel(aid)
+            except tk.TclError:
+                pass
+        self._after_ids.clear()
+        try:
+            leftover = self.root.tk.call("after", "info")
+            for aid in str(leftover).split():
+                try:
+                    self.root.after_cancel(aid)
+                except tk.TclError:
+                    pass
+        except tk.TclError:
+            pass
+
+    def _destroy(self, *args, **kwargs) -> None:
+        self._cancel_afters()
+        try:
+            self._tk_destroy(*args, **kwargs)
+        except tk.TclError:
+            pass
+
+    def _on_close(self) -> None:
+        self._destroy()
+
+    def _on_destroy(self, event) -> None:
+        if event.widget is self.root:
+            self._alive = False
+
+    def _after(self, ms: int, fn) -> None:
+        if not self._alive:
+            return
+        try:
+            self._after_ids.append(self.root.after(ms, fn))
+        except tk.TclError:
+            pass
 
     def _style(self) -> None:
         style = ttk.Style(self.root)
@@ -607,7 +733,12 @@ class TokenHud:
         inner.pack(fill="x", padx=INSET, pady=12)
         tk.Label(inner, text="Spend", bg=CARD, fg=FG2, font=self.f.caption, anchor="w").pack(fill="x")
         self.spend_big = tk.Label(inner, text="$--", bg=CARD, fg=FG, font=self.f.mono_lg, anchor="w")
-        self.spend_big.pack(fill="x", pady=(0, 6))
+        self.spend_big.pack(fill="x", pady=(0, 8))
+        self.kv_included = self._kv(inner, "Included")
+        self.kv_ondemand = self._kv(inner, "On-demand")
+        self.kv_cloud = self._kv(inner, "Cloud")
+        self.kv_interactive = self._kv(inner, "Interactive")
+        self.kv_tokens = self._kv(inner, "Tokens")
         self.cycle_stats = tk.Label(
             inner,
             text="Fetching billing cycle from cursor.com...",
@@ -618,7 +749,6 @@ class TokenHud:
             fg=FG2,
             wraplength=560,
         )
-        self.cycle_stats.pack(fill="x")
 
         section_label(page, "Where the dollars went", self.f)
         chats_card = make_card(page)
@@ -759,40 +889,23 @@ class TokenHud:
         scroll = VerticalScroll(self.tab_resets)
         scroll.pack(fill="both", expand=True)
         page = scroll.inner
+        top = tk.Frame(page, bg=BG)
+        top.pack(fill="x", pady=(0, 10))
         tk.Label(
-            page,
-            text="Claude / Codex provider windows -- not Cursor Other Models or billing-cycle %.",
+            top,
+            text="Provider windows -- not Cursor billing-cycle %.",
             bg=BG,
             fg=FG2,
             anchor="w",
-            wraplength=560,
-            justify="left",
             font=self.f.caption,
-        ).pack(fill="x", pady=(0, 2))
-        tk.Label(
-            page,
-            text=(
-                f"Edit {config_path()} (America/New_York). Weekly times ship as PLACEHOLDERS -- "
-                "paste real weekday+time from Settings -> Usage, then set weekly_placeholder to false. "
-                "HUD reloads the JSON on save. No Anthropic/OpenAI scrape."
-            ),
-            bg=BG,
-            fg=FG3,
-            anchor="w",
-            wraplength=560,
-            justify="left",
-            font=self.f.micro,
-        ).pack(fill="x", pady=(0, 10))
+        ).pack(side="left", fill="x", expand=True)
+        make_action(top, "Test buzz", self._test_buzz, fonts=self.f, primary=True).pack(side="right")
 
         self.reset_cards = {}
         for key, title in (("claude", "Claude"), ("codex", "Codex / ChatGPT")):
             card = ProviderCard(page, title, self.f, lambda k=key: self._mark_session(k))
             card.pack(fill="x", pady=(0, 10))
             self.reset_cards[key] = card
-
-        buzz_row = tk.Frame(page, bg=BG)
-        buzz_row.pack(fill="x", pady=(0, 10))
-        make_action(buzz_row, "Test buzz", self._test_buzz, fonts=self.f, primary=True).pack(side="left")
 
         alerts = make_card(page)
         alerts.pack(fill="x")
@@ -832,15 +945,35 @@ class TokenHud:
             ).grid(row=i // 3, column=i % 3, sticky="w", padx=(0, 16), pady=2)
 
         self.reset_status = tk.Label(page, text="", bg=BG, fg=FG3, anchor="w", font=self.f.micro)
-        self.reset_status.pack(fill="x", pady=(10, 8))
+        self.reset_status.pack(fill="x", pady=(10, 4))
+        tk.Label(
+            page,
+            text=(
+                f"Edit {config_path()} (America/New_York). Weekly times ship as PLACEHOLDERS -- "
+                "paste real weekday+time from Settings -> Usage, then set weekly_placeholder to false. "
+                "HUD reloads the JSON on save. No Anthropic/OpenAI scrape."
+            ),
+            bg=BG,
+            fg=FG3,
+            anchor="w",
+            wraplength=560,
+            justify="left",
+            font=self.f.micro,
+        ).pack(fill="x", pady=(0, 8))
         self._apply_resets()
 
-    def _tree(self, parent, columns, widths, height: int) -> ttk.Treeview:
-        tree = ttk.Treeview(parent, columns=columns, show="headings", height=height, style="Dark.Treeview")
-        for col, w in widths.items():
-            tree.column(col, width=w, anchor="w", stretch=(col in ("name", "model")))
-        tree.pack(fill="x", padx=1, pady=1)
-        return tree
+    def _kv(self, parent: tk.Misc, label: str) -> tk.Label:
+        row = tk.Frame(parent, bg=CARD)
+        row.pack(fill="x", pady=1)
+        tk.Label(row, text=label, bg=CARD, fg=FG3, font=self.f.caption, anchor="w").pack(side="left")
+        val = tk.Label(row, text="", bg=CARD, fg=FG, font=self.f.mono_sm, anchor="e")
+        val.pack(side="right")
+        return val
+
+    def _tree(self, parent, columns, widths, height: int) -> SimpleTable:
+        table = SimpleTable(parent, columns, widths, self.f)
+        table.pack(fill="x")
+        return table
 
     def _on_resize(self, event) -> None:
         if event.widget is not self.root:
@@ -867,6 +1000,11 @@ class TokenHud:
             self.pinned = self.recent[idx][0]
 
     def refresh_local(self) -> None:
+        if not self._alive:
+            return
+        if self._pause_local:
+            self._after(REFRESH_MS, self.refresh_local)
+            return
         try:
             db = cursor_state_db()
             if not db.exists():
@@ -885,7 +1023,7 @@ class TokenHud:
             self.redraw_list(snap.get("id"))
         except Exception as exc:
             self._paint_chat({"error": f"Read failed:\n{exc}"})
-        self.root.after(REFRESH_MS, self.refresh_local)
+        self._after(REFRESH_MS, self.refresh_local)
 
     def _paint_chat(self, snap: dict) -> None:
         if snap.get("error"):
@@ -917,8 +1055,10 @@ class TokenHud:
         self.body.configure(text=self.render_chat(snap), fg=FG)
 
     def _billing_tick(self) -> None:
+        if not self._alive:
+            return
         self._try_fetch(force=False)
-        self.root.after(BILLING_POLL_MS, self._billing_tick)
+        self._after(BILLING_POLL_MS, self._billing_tick)
 
     def _try_fetch(self, force: bool = False) -> None:
         now = time.time()
@@ -939,9 +1079,9 @@ class TokenHud:
     def _fetch_thread(self, force: bool) -> None:
         try:
             report = fetch_cycle(force=force)
-            self.root.after(0, lambda r=report: self._on_billing_ok(r))
+            self._after(0, lambda r=report: self._on_billing_ok(r))
         except Exception as exc:
-            self.root.after(0, lambda e=exc: self._on_billing_err(str(e)))
+            self._after(0, lambda e=exc: self._on_billing_err(str(e)))
 
     def _on_billing_ok(self, report: dict) -> None:
         self.report = report
@@ -983,13 +1123,31 @@ class TokenHud:
         hl = r.get("headless") or {}
         inter = r.get("interactive") or {}
         self.spend_big.configure(text=fmt_money(r.get("total_spend_cents") or 0))
-        lines = [
-            f"Included {fmt_money(r.get('included_cents') or 0)}  +  bonus {fmt_money(r.get('bonus_cents') or 0)}",
-            f"On-demand  {'on' if r.get('on_demand_enabled') else 'off (hard stop when remaining pools empty)'}",
-            f"Cloud {fmt_money(hl.get('cents') or 0)} · {hl.get('n') or 0}    Interactive {fmt_money(inter.get('cents') or 0)} · {inter.get('n') or 0}",
-            f"in {fmt_int(r.get('agg_input'))}   out {fmt_int(r.get('agg_output'))}   cacheRead {fmt_int(r.get('agg_cache_read'))}   cacheWrite {fmt_int(r.get('agg_cache_write'))}",
-        ]
-        self.cycle_stats.configure(text="\n".join(lines), fg=FG2)
+        inc = fmt_money(r.get("included_cents") or 0)
+        bonus = fmt_money(r.get("bonus_cents") or 0)
+        on_demand = "On" if r.get("on_demand_enabled") else "Off (hard stop when pools empty)"
+        cloud = f"{fmt_money(hl.get('cents') or 0)}  ·  {hl.get('n') or 0}"
+        interactive = f"{fmt_money(inter.get('cents') or 0)}  ·  {inter.get('n') or 0}"
+        tokens = (
+            f"in {fmt_int(r.get('agg_input'))}   out {fmt_int(r.get('agg_output'))}   "
+            f"cacheRead {fmt_int(r.get('agg_cache_read'))}   cacheWrite {fmt_int(r.get('agg_cache_write'))}"
+        )
+        self.kv_included.configure(text=f"{inc}  +  bonus {bonus}")
+        self.kv_ondemand.configure(text=on_demand)
+        self.kv_cloud.configure(text=cloud)
+        self.kv_interactive.configure(text=interactive)
+        self.kv_tokens.configure(text=tokens)
+        self.cycle_stats.configure(
+            text="\n".join(
+                [
+                    f"Included {inc}  +  bonus {bonus}",
+                    f"On-demand  {on_demand}",
+                    f"Cloud {cloud}    Interactive {interactive}",
+                    tokens,
+                ]
+            ),
+            fg=FG2,
+        )
 
         for tree in (self.chats_tree, self.models_tree, self.days_tree):
             tree.delete(*tree.get_children())
@@ -1073,6 +1231,8 @@ class TokenHud:
             self.listbox.insert("end", label)
 
     def _reset_tick(self) -> None:
+        if not self._alive:
+            return
         try:
             self._apply_resets()
             events = consume_due_events()
@@ -1080,7 +1240,7 @@ class TokenHud:
                 self._on_reset_buzz(events)
         except Exception as exc:
             self.reset_status.configure(text=f"Reset clock error: {exc}", fg=NOW)
-        self.root.after(RESET_TICK_MS, self._reset_tick)
+        self._after(RESET_TICK_MS, self._reset_tick)
 
     def _apply_resets(self) -> None:
         path = config_path()
@@ -1163,10 +1323,10 @@ class TokenHud:
             self.banner.pack(fill="x", before=self.chrome, padx=PAD, pady=(12, 0))
         self._flash_n = 0
         self._flash_step(gen)
-        self.root.after(5000, lambda: self._hide_banner(gen))
+        self._after(5000, lambda: self._hide_banner(gen))
 
     def _flash_step(self, gen: int) -> None:
-        if gen != self._banner_gen:
+        if not self._alive or gen != self._banner_gen:
             return
         self._flash_n += 1
         bg = FLASH[(self._flash_n - 1) % len(FLASH)]
@@ -1176,7 +1336,7 @@ class TokenHud:
         self.banner_pill.configure(bg=pill)
         self.banner_label.configure(bg=pill)
         if self._flash_n < 6:
-            self.root.after(160, lambda: self._flash_step(gen))
+            self._after(160, lambda: self._flash_step(gen))
         else:
             self.root.configure(bg=BG)
             self.banner.configure(bg=BG)
@@ -1184,7 +1344,7 @@ class TokenHud:
             self.banner_label.configure(bg=BANNER_BG)
 
     def _hide_banner(self, gen: int) -> None:
-        if gen != self._banner_gen:
+        if not self._alive or gen != self._banner_gen:
             return
         self.banner.pack_forget()
         self.root.configure(bg=BG)

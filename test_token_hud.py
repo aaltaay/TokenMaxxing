@@ -121,6 +121,7 @@ class ResetsTabTest(unittest.TestCase):
         self.assertIn("Overall 41%", hud.header_status.cget("text"))
         self.assertEqual(hud.header_api_pct.cget("text"), "75%")
         self.assertEqual(hud.spend_big.cget("text"), "$184.22")
+        self.assertIn("$100.00", hud.kv_included.cget("text"))
         self.assertEqual(len(hud.chats_tree.get_children()), 1)
         self.assertIn("scarce pool", hud.why.get("1.0", "end"))
 
