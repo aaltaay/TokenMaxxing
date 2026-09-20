@@ -30,3 +30,34 @@ test('sound and pulse stop automatically while notice remains until dismissed', 
   assert.equal(buzzes,prior);
   alert.dismiss();
 });
+
+test('dismissing a warning keeps it from resurfacing even if the backend resends it with a jittered boundary', () => {
+  let state;
+  const win={isDestroyed:()=>false,isAlwaysOnTop:()=>false,isMinimized:()=>false,
+    setAlwaysOnTop(){},show(){},moveTop(){},focus(){},flashFrame(){}};
+  const alert=new ResetAttention({getWindow:()=>win,publish:s=>state=s,buzz(){},notify(){}});
+  alert.show([{id:'claude:five_hour:prewarn:1000',phase:'prewarn',message:'13 minutes'}]);
+  assert.ok(state);
+  alert.dismiss();
+  assert.equal(state,null);
+  // Same window/phase, slightly different boundary — still the same warning.
+  alert.show([{id:'claude:five_hour:prewarn:1005',phase:'prewarn',message:'12 minutes'}]);
+  assert.equal(state,null);
+  // A genuine reset for that window clears the dismissal for what comes next.
+  alert.show([{id:'claude:five_hour:reset:1005',phase:'reset',message:'Usage has reset.'}]);
+  assert.ok(state);
+  alert.dismiss();
+  alert.show([{id:'claude:five_hour:prewarn:9000',phase:'prewarn',message:'13 minutes'}]);
+  assert.ok(state);
+});
+
+test('a Codex window id containing a colon still dedupes and clears correctly', () => {
+  let state;
+  const win={isDestroyed:()=>false,isAlwaysOnTop:()=>false,isMinimized:()=>false,
+    setAlwaysOnTop(){},show(){},moveTop(){},focus(){},flashFrame(){}};
+  const alert=new ResetAttention({getWindow:()=>win,publish:s=>state=s,buzz(){},notify(){}});
+  alert.show([{id:'codex:codex:primary:prewarn:1000',phase:'prewarn',message:'13 minutes'}]);
+  alert.dismiss();
+  alert.show([{id:'codex:codex:primary:prewarn:1005',phase:'prewarn',message:'12 minutes'}]);
+  assert.equal(state,null);
+});
