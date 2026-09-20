@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Token HUD</title>
+  <link rel="stylesheet" href="/tokens.css">
+  <link rel="stylesheet" href="/apple.css">
+</head>
+<body>
+  <div id="app">
+    <div id="banner" hidden>
+      <p id="banner-text"></p>
+    </div>
+
+    <header class="mast">
+      <div class="mast-row">
+        <h1 id="plan">Loading cycle...</h1>
+        <p class="wordmark">Token HUD</p>
+      </div>
+      <p id="header-status" class="lede"></p>
+
+      <div class="meter-block">
+        <div class="meter-row">
+          <span class="meter-name">Other Models</span>
+          <span id="api-pct" class="meter-pct num">--%</span>
+          <span class="meter-hint">named / API</span>
+        </div>
+        <div class="track" aria-hidden="true"><div id="api-fill" class="fill"></div></div>
+      </div>
+
+      <div class="meter-block">
+        <div class="meter-row">
+          <span class="meter-name">Cursor Models</span>
+          <span id="auto-pct" class="meter-pct num">--%</span>
+          <span class="meter-hint">Grok / Composer</span>
+        </div>
+        <div class="track" aria-hidden="true"><div id="auto-fill" class="fill"></div></div>
+      </div>
+
+      <p id="header-note" class="note"></p>
+    </header>
+
+    <nav class="segments" role="tablist" aria-label="Token HUD">
+      <button type="button" role="tab" data-tab="cycle" class="on" aria-selected="true">This cycle</button>
+      <button type="button" role="tab" data-tab="chat" aria-selected="false">This chat</button>
+      <button type="button" role="tab" data-tab="resets" aria-selected="false">Resets</button>
+    </nav>
+
+    <main>
+      <section id="tab-cycle" class="tab" data-tab-panel="cycle">
+        <div class="toolbar">
+          <button type="button" class="btn primary" id="btn-refresh">Refresh usage</button>
+          <p id="cycle-status" class="meta"></p>
+        </div>
+
+        <article class="card elevate">
+          <p class="section-kicker">Spend</p>
+          <p id="spend-big" class="hero-num num">$--</p>
+          <dl class="kv">
+            <div><dt>Included</dt><dd id="kv-included" class="num"></dd></div>
+            <div><dt>On-demand</dt><dd id="kv-ondemand"></dd></div>
+            <div><dt>Cloud</dt><dd id="kv-cloud" class="num"></dd></div>
+            <div><dt>Interactive</dt><dd id="kv-interactive" class="num"></dd></div>
+            <div><dt>Tokens</dt><dd id="kv-tokens" class="num"></dd></div>
+          </dl>
+        </article>
+
+        <h2 class="section-title">Where the dollars went</h2>
+        <article class="card table-card">
+          <table>
+            <thead>
+              <tr>
+                <th>$</th>
+                <th>Other $</th>
+                <th>n</th>
+                <th>cloud</th>
+                <th class="wide">Chat / cloud agent</th>
+              </tr>
+            </thead>
+            <tbody id="chats-body"></tbody>
+          </table>
+        </article>
+
+        <h2 class="section-title">By model</h2>
+        <article class="card table-card">
+          <table>
+            <thead>
+              <tr>
+                <th>$</th>
+                <th>pool</th>
+                <th>in</th>
+                <th>out</th>
+                <th class="wide">model</th>
+              </tr>
+            </thead>
+            <tbody id="models-body"></tbody>
+          </table>
+        </article>
+
+        <h2 class="section-title">By day</h2>
+        <article class="card table-card">
+          <table>
+            <thead>
+              <tr>
+                <th>date</th>
+                <th>$</th>
+                <th>events</th>
+              </tr>
+            </thead>
+            <tbody id="days-body"></tbody>
+          </table>
+        </article>
+
+        <h2 class="section-title">Was it used properly?</h2>
+        <article class="card">
+          <div id="findings" class="findings"></div>
+        </article>
+      </section>
+
+      <section id="tab-chat" class="tab" data-tab-panel="chat" hidden>
+        <div class="toolbar">
+          <p id="follow" class="lede grow"></p>
+          <button type="button" class="btn ghost" id="btn-follow">Follow Cursor tab</button>
+        </div>
+
+        <article class="card elevate">
+          <div class="meter-row">
+            <span id="chat-model" class="meter-name"></span>
+            <span id="chat-pct" class="hero-num num">--%</span>
+          </div>
+          <div class="track tall" aria-hidden="true"><div id="chat-fill" class="fill"></div></div>
+          <p id="chat-input" class="chat-input num"></p>
+          <p id="chat-billed" class="note"></p>
+        </article>
+
+        <h2 class="section-title">Context breakdown</h2>
+        <article class="card">
+          <pre id="chat-body" class="mono-block"></pre>
+        </article>
+
+        <h2 class="section-title">Click a chat if the tab switch lags</h2>
+        <article class="card list-card">
+          <div id="chat-list" class="chat-list"></div>
+        </article>
+        <p class="footnote">INPUT is this chat's live context window. OUTPUT billed is on This cycle.</p>
+      </section>
+
+      <section id="tab-resets" class="tab" data-tab-panel="resets" hidden>
+        <div class="toolbar">
+          <p class="lede grow">Provider windows -- not Cursor billing-cycle %.</p>
+          <button type="button" class="btn primary" id="btn-buzz">Test buzz</button>
+        </div>
+
+        <article class="card elevate provider" data-provider="claude">
+          <div class="provider-head">
+            <h2>Claude</h2>
+            <span class="pill" data-pill="claude">OK</span>
+          </div>
+          <div class="clock" data-clock="claude-session">
+            <div class="clock-row">
+              <span class="meter-name">Session</span>
+              <span class="clock-left num" data-left></span>
+            </div>
+            <p class="note" data-next></p>
+            <p class="meta" data-meta></p>
+            <div class="track" aria-hidden="true"><div class="fill" data-fill></div></div>
+          </div>
+          <div class="clock" data-clock="claude-weekly">
+            <div class="clock-row">
+              <span class="meter-name">Weekly</span>
+              <span class="clock-left num" data-left></span>
+            </div>
+            <p class="note" data-next></p>
+            <p class="meta" data-meta></p>
+            <div class="track" aria-hidden="true"><div class="fill" data-fill></div></div>
+          </div>
+          <div class="toolbar tight">
+            <button type="button" class="btn ghost" data-mark="claude">Mark session now</button>
+          </div>
+        </article>
+
+        <article class="card elevate provider" data-provider="codex">
+          <div class="provider-head">
+            <h2>Codex / ChatGPT</h2>
+            <span class="pill" data-pill="codex">OK</span>
+          </div>
+          <div class="clock" data-clock="codex-session">
+            <div class="clock-row">
+              <span class="meter-name">Session</span>
+              <span class="clock-left num" data-left></span>
+            </div>
+            <p class="note" data-next></p>
+            <p class="meta" data-meta></p>
+            <div class="track" aria-hidden="true"><div class="fill" data-fill></div></div>
+          </div>
+          <div class="clock" data-clock="codex-weekly">
+            <div class="clock-row">
+              <span class="meter-name">Weekly</span>
+              <span class="clock-left num" data-left></span>
+            </div>
+            <p class="note" data-next></p>
+            <p class="meta" data-meta></p>
+            <div class="track" aria-hidden="true"><div class="fill" data-fill></div></div>
+          </div>
+          <div class="toolbar tight">
+            <button type="button" class="btn ghost" data-mark="codex">Mark session now</button>
+          </div>
+        </article>
+
+        <h2 class="section-title">Alerts</h2>
+        <article class="card">
+          <div class="toggles">
+            <label class="toggle"><input type="checkbox" data-toggle="claude_session" checked><span class="switch"></span>Claude session</label>
+            <label class="toggle"><input type="checkbox" data-toggle="claude_weekly" checked><span class="switch"></span>Claude weekly</label>
+            <label class="toggle"><input type="checkbox" data-toggle="codex_session" checked><span class="switch"></span>Codex session</label>
+            <label class="toggle"><input type="checkbox" data-toggle="codex_weekly" checked><span class="switch"></span>Codex weekly</label>
+            <label class="toggle"><input type="checkbox" data-toggle="prewarn" checked><span class="switch"></span>Pre-warn</label>
+            <label class="toggle"><input type="checkbox" data-toggle="sound" checked><span class="switch"></span>Sound</label>
+          </div>
+        </article>
+
+        <p id="reset-status" class="meta"></p>
+        <p id="reset-help" class="footnote"></p>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
