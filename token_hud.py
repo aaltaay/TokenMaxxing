@@ -1,4 +1,4 @@
-"""Always-on-top Cursor token meter.
+"""Always-on-top Token HUD.
 
 Tab 1: this billing cycle (the 75% question).
 Tab 2: the selected chat's context window, plus billed $ for that chat.
@@ -94,7 +94,7 @@ class TokenHud:
         self._flash_n = 0
 
         self.root = tk.Tk()
-        self.root.title("Cursor tokens")
+        self.root.title("Token HUD")
         self.root.configure(bg=BG)
         self.root.attributes("-topmost", True)
         self.root.resizable(True, True)

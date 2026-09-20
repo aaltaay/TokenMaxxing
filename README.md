@@ -1,4 +1,4 @@
-# Cursor Token HUD
+# Token HUD
 
 Always-on-top window that answers three questions the Cursor UI splits apart:
 
@@ -6,7 +6,7 @@ Always-on-top window that answers three questions the Cursor UI splits apart:
 2. **This chat -- how fat is the context window right now?** Same snapshot Cursor already writes to `state.vscdb`.
 3. **Resets -- when do Claude / Codex provider windows refresh?** 5-hour session and weekly countdowns, plus a Windows desktop buzz. Not the Cursor billing-cycle %.
 
-This is not an official Cursor product. Billing numbers come from the same unofficial `cursor.com` dashboard session the app already has (`cursorAuth/accessToken`). That JWT is never written to disk by this tool.
+This is not an official Cursor product. Billing numbers come from the same unofficial `cursor.com` dashboard session the app already has (`cursorAuth/accessToken`). That JWT is never written to disk by this tool. Source: [aaltaay/token-hud](https://github.com/aaltaay/token-hud).
 
 ## Why the old HUD felt useless
 
@@ -150,7 +150,7 @@ Cache / config (no secrets):
 
 `sessionStart` then launches the HUD when an agent session starts. If it is already running, the second launch exits immediately.
 
-On Windows you can also drop `start.vbs` in the Startup folder, and keep a Desktop / Start Menu shortcut named **Cursor tokens**.
+On Windows you can also drop `start.vbs` in the Startup folder, and keep a Desktop / Start Menu shortcut named **Token HUD**.
 
 ### Cursor CLI status line (optional)
 

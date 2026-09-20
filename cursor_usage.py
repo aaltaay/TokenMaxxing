@@ -19,7 +19,7 @@ from pathlib import Path
 CACHE_TTL_S = 180
 DASHBOARD = "https://cursor.com"
 API2 = "https://api2.cursor.sh"
-USER_AGENT = "cursor-token-hud/2.0"
+USER_AGENT = "token-hud/2.0"
 OVERHEAD_IDS = ("system_prompt", "tools", "rules", "skills", "mcp", "subagents")
 CURSOR_MODEL_HINTS = (
     "cursor-grok",

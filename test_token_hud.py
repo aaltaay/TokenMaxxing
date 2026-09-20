@@ -19,6 +19,7 @@ class ResetsTabTest(unittest.TestCase):
 
         hud = TokenHud()
         self.addCleanup(hud.root.destroy)
+        self.assertEqual(hud.root.title(), "Token HUD")
         tabs = [hud.nb.tab(i, "text").strip() for i in hud.nb.tabs()]
         self.assertEqual(tabs, ["This cycle", "This chat", "Resets"])
         hud.nb.select(hud.tab_resets)
