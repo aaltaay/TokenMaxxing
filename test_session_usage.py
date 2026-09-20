@@ -47,7 +47,7 @@ class SessionsTest(unittest.TestCase):
             result=s.get_sessions('codex','one')
         self.assertEqual(result['chat']['cost']['cents'],33)
         self.assertNotIn('_path',result['chat'])
-        estimate.assert_called_once_with(str(self.path))
+        estimate.assert_called_once_with(str(self.path), 'codex')
     def test_open_chat_switches_without_any_log_writes(self):
         rows=[{'id':'background','name':'Background','used':999},
               {'id':'one','name':'One','used':100},{'id':'two','name':'Two','used':200}]
@@ -94,12 +94,61 @@ class SessionsTest(unittest.TestCase):
 
     def test_stale_or_missing_pointer_never_shows_a_background_session(self):
         home=Path(self.tmp.name)/'hud2';home.mkdir()
-        rows=[{'id':'one','name':'One','used':999}]
+        rows=[{'id':'one','name':'One','used':999,'updated_at':time.time()-s.RECENT_LOG_SECONDS-1}]
         with patch.dict(s.os.environ,{'TOKENMAXXING_HOME':str(home)}), patch.object(s,'file_sessions',return_value=rows):
-            self.assertIsNone(s.get_sessions('claude',follow='active')['chat'])
+            result=s.get_sessions('claude',follow='active')
+            self.assertIsNone(result['chat'])
+            self.assertIsNone(result['follow_source'])
+            self.assertIn('15 minutes',result['reason'])
             (home/'claude-active.json').write_text(json.dumps({'session_id':'one','at':time.time()-s.POINTER_MAX_AGE-1}),encoding='utf-8')
             s._cache.clear()
             self.assertIsNone(s.get_sessions('claude',follow='active')['chat'])
+
+    def test_without_a_status_line_the_log_being_written_is_the_open_session(self):
+        home=Path(self.tmp.name)/'hud3';home.mkdir()
+        rows=[{'id':'live','name':'Live','used':5,'updated_at':time.time()-30},
+              {'id':'old','name':'Old','used':999,'updated_at':time.time()-3600}]
+        with patch.dict(s.os.environ,{'TOKENMAXXING_HOME':str(home)}), patch.object(s,'file_sessions',return_value=rows):
+            result=s.get_sessions('claude',follow='active')
+            self.assertEqual(result['chat']['id'],'live')
+            self.assertEqual(result['selection_mode'],'active')
+            self.assertEqual(result['follow_source'],'recent log')
+            pinned=s.get_sessions('claude',pinned='old',follow='active')
+            self.assertEqual(pinned['chat']['id'],'old')
+            self.assertIsNone(pinned['follow_source'])
+
+    def test_open_claude_window_title_selects_that_session_ahead_of_the_busiest_log(self):
+        config=Path(self.tmp.name)/'claude';(config/'sessions').mkdir(parents=True)
+        (config/'sessions'/'1.json').write_text(json.dumps({'pid':1,'sessionId':'nova','name':'Pull latest','updatedAt':5}),encoding='utf-8')
+        (config/'sessions'/'2.json').write_text(json.dumps({'pid':2,'sessionId':'busy','name':'Usage tracking','updatedAt':9}),encoding='utf-8')
+        (config/'sessions'/'3.json').write_text('{not json',encoding='utf-8')
+        rows=[{'id':'busy','name':'busy','used':1,'updated_at':time.time()-5},
+              {'id':'nova','name':'nova','used':2,'updated_at':time.time()-200}]
+        home=Path(self.tmp.name)/'hud4';home.mkdir()
+        with patch.dict(s.os.environ,{'CLAUDE_CONFIG_DIR':str(config),'TOKENMAXXING_HOME':str(home)}), patch.object(s,'file_sessions',return_value=rows):
+            self.assertEqual(s.claude_titles(),{'nova':'Pull latest','busy':'Usage tracking'})
+            shown=s.get_sessions('claude',follow='active',active_title='Pull latest')
+            self.assertEqual(shown['chat']['id'],'nova')
+            self.assertEqual(shown['follow_source'],'open window')
+            self.assertEqual(shown['chat']['name'],'Pull latest · nova')
+            self.assertEqual([c['name'] for c in shown['chats']],['Usage tracking · busy','Pull latest · nova'])
+            s._cache.clear()
+            unknown=s.get_sessions('claude',follow='active',active_title='Never seen')
+            self.assertEqual(unknown['chat']['id'],'busy')
+            self.assertEqual(unknown['follow_source'],'recent log')
+            s._cache.clear()
+            pointer_wins=s.get_sessions('claude',follow='latest',active_title='Pull latest')
+            self.assertEqual(pointer_wins['chat']['id'],'busy')
+            self.assertIsNone(pointer_wins['follow_source'])
+
+    def test_selected_claude_cost_is_estimated_from_its_log(self):
+        self.path.write_text(json.dumps({'type':'assistant','sessionId':'c1','requestId':'r1','cwd':'/w/proj','message':{'model':'claude-opus-5',
+            'usage':{'input_tokens':1_000_000,'cache_read_input_tokens':0,'cache_creation_input_tokens':0,'output_tokens':0}}})+'\n',encoding='utf-8')
+        rows=[{'id':'c1','name':'One','used':1,'updated_at':time.time(),'_path':str(self.path)}]
+        with patch.object(s,'file_sessions',return_value=rows):
+            result=s.get_sessions('claude',follow='latest')
+        self.assertAlmostEqual(result['chat']['cost']['cents'],500)
+        self.assertNotIn('_path',result['chat'])
 
     def test_unchanged_log_is_not_read_again_and_only_the_selection_is_detailed(self):
         self.path.write_text(json.dumps({'type':'assistant','sessionId':'abc','cwd':'C:/work/p',
