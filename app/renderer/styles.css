@@ -162,6 +162,9 @@ body.is-mac .titlebar { --titlebar-inset: 84px; }
   font-weight: 500;
   color: var(--ink-3);
   border-radius: 999px;
+  /* The thumb is positioned by offsetLeft/offsetWidth on one axis, so a tab
+     that wraps would leave it stranded. Four tabs must stay on one line. */
+  white-space: nowrap;
   transition: color 0.2s var(--ease);
 }
 .segmented button[aria-selected="true"] { color: var(--ink); }
@@ -519,6 +522,7 @@ body.is-mac .titlebar { --titlebar-inset: 84px; }
 
 /* narrow window: the dial stacks above the legend, tiles go two-up */
 @media (max-width: 620px) {
+  .segmented button { padding: 6px 12px; font-size: 12px; }
   .hero { flex-direction: column; align-items: stretch; }
   .dial { align-self: center; }
   .tiles { grid-template-columns: repeat(2, 1fr); }
@@ -541,3 +545,106 @@ body.is-mac .titlebar { --titlebar-inset: 84px; }
 .sms-settings::backdrop { background:#000b; }
 .sms-settings label { display:block; margin:16px 0; }
 .sms-settings input { display:block; width:100%; padding:10px; margin-top:6px; background:#0c0c0f; color:#fff; border:1px solid #666; border-radius:8px; box-sizing:border-box; }
+
+/* ── guide view ────────────────────────────────────────────────────────── */
+/* A reference card, not a readout: nothing here is fetched, so it carries no
+   severity colour. Providers keep their identity hue; cost is shown with
+   colourless pips so it never reads as a status. */
+
+.guide-lede { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--ink-2); }
+.guide-lede b { color: var(--ink); font-weight: 600; }
+
+.guide-axes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 13px; }
+.guide-axis {
+  padding: 12px 13px;
+  border-radius: var(--radius-md);
+  background: var(--raised);
+  border: 1px solid var(--hairline);
+}
+.guide-axis .kicker { display: block; margin-bottom: 5px; }
+.guide-axis p { margin: 0; font-size: 11.5px; line-height: 1.5; color: var(--ink-2); }
+
+/* The provider hue rides a hairline rail down the card's left edge — present
+   enough to sort the cards apart, quiet enough not to look like a meter. */
+.guide-provider { position: relative; overflow: hidden; }
+.guide-provider::before {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  width: 3px;
+  background: var(--c, var(--accent));
+  opacity: 0.85;
+}
+.guide-provider .card-head h2 { color: var(--c, var(--ink)); }
+.guide-claude { --c: var(--brand-claude); }
+.guide-codex  { --c: var(--brand-codex); }
+.guide-cursor { --c: var(--brand-cursor); }
+.guide-other  { --c: var(--brand-6); }
+
+.guide-rows { display: flex; flex-direction: column; }
+.guide-row {
+  display: grid;
+  grid-template-columns: 152px 1fr;
+  column-gap: 14px;
+  row-gap: 3px;
+  padding: 11px 0;
+}
+.guide-row:first-child { padding-top: 2px; }
+.guide-row:last-child { padding-bottom: 2px; }
+.guide-row + .guide-row { border-top: 1px solid var(--hairline); }
+.guide-head {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.guide-name { font-size: 12.5px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.3; }
+.guide-what { grid-column: 2; font-size: 12px; line-height: 1.55; color: var(--ink); }
+.guide-when { grid-column: 2; font-size: 11px; line-height: 1.5; color: var(--ink-3); }
+.guide-when b { font-weight: 600; color: var(--ink-2); }
+
+/* Cost as pips: three steps, filled left to right. Colourless on purpose —
+   an expensive model is a choice, not an alert. */
+.guide-cost { display: inline-flex; align-items: center; gap: 3px; }
+.guide-cost i { width: 13px; height: 3px; border-radius: 2px; background: var(--track); }
+.guide-cost i.is-on { background: var(--ink-3); }
+.guide-cost.is-top i.is-on { background: var(--c, var(--ink-2)); }
+
+/* effort ladder */
+.effort { display: flex; flex-direction: column; }
+.effort-row {
+  display: grid;
+  grid-template-columns: 78px 76px 1fr;
+  align-items: baseline;
+  column-gap: 13px;
+  row-gap: 3px;
+  padding: 9px 0;
+}
+.effort-row + .effort-row { border-top: 1px solid var(--hairline); }
+.effort-name { font: 600 11.5px/1.3 var(--mono); letter-spacing: -0.01em; }
+.effort-gauge { display: inline-flex; gap: 2px; align-self: center; }
+.effort-gauge i { width: 12px; height: 5px; border-radius: 2px; background: var(--track); }
+.effort-gauge i.is-on { background: var(--accent); }
+.effort-what { font-size: 11.5px; line-height: 1.5; color: var(--ink-2); }
+.effort-for { grid-column: 3; font-size: 11px; line-height: 1.45; color: var(--ink-3); }
+
+/* habits */
+.habits { display: flex; flex-direction: column; gap: 10px; }
+.habit { display: grid; grid-template-columns: 16px 1fr; gap: 3px 10px; }
+.habit svg { grid-row: 1 / span 2; width: 15px; height: 15px; color: var(--ink-4); margin-top: 1px; }
+.habit-title { font-size: 12.5px; font-weight: 600; letter-spacing: -0.01em; }
+.habit-body { font-size: 11.5px; line-height: 1.55; color: var(--ink-2); }
+
+.guide-foot { margin: 0; font-size: 10.5px; line-height: 1.55; color: var(--ink-4); }
+
+@media (max-width: 620px) {
+  .guide-axes { grid-template-columns: 1fr; }
+  .guide-row { grid-template-columns: 1fr; }
+  .guide-head { grid-row: auto; grid-column: 1; flex-direction: row; align-items: center; gap: 9px; }
+  .guide-what, .guide-when { grid-column: 1; }
+  .effort-row { grid-template-columns: 78px 1fr; }
+  .effort-gauge { grid-column: 2; justify-self: start; }
+  .effort-what, .effort-for { grid-column: 1 / -1; }
+}

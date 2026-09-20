@@ -49,6 +49,7 @@
     <button role="tab" id="tab-overview" aria-controls="view-overview" aria-selected="true">Overview</button>
     <button role="tab" id="tab-chat" aria-controls="view-chat" aria-selected="false">Sessions</button>
     <button role="tab" id="tab-resets" aria-controls="view-resets" aria-selected="false">Limits & resets</button>
+    <button role="tab" id="tab-guide" aria-controls="view-guide" aria-selected="false">Model guide</button>
   </nav>
 
   <main class="views">
@@ -145,6 +146,370 @@
         <p class="tile-note gap-above" id="resetConfigPath">15-minute reminder + confirmed-reset alert. Brings this window forward, pulses its border, flashes the taskbar, and repeats a sound for up to one minute. Dismiss stops it immediately. Keep TOKENMAXXING running; minimized is fine.</p>
         <p class="tile-note" id="smsStatus" role="status">SMS not configured.</p>
       </div>
+    </section>
+
+    <!-- ── Model guide ───────────────────────────────────────────────── -->
+    <!-- Static reference. Nothing on this tab is fetched, computed, or tied
+         to a reading: it is the one place in the app that tells you what to
+         spend a quota on, while every other tab tells you how much is left. -->
+    <section class="view" id="view-guide" role="tabpanel" aria-labelledby="tab-guide">
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Spend the cheapest thing that will actually work</h2>
+          <span class="meta">Reference · nothing read</span>
+        </div>
+        <p class="guide-lede">
+          Most quota goes to overkill: a heavyweight model grinding at maximum effort on
+          something a default would have finished. Two dials decide the bill, and they move
+          independently — <b>which model reasons</b>, and <b>how hard it works on this turn</b>.
+        </p>
+        <div class="guide-axes">
+          <div class="guide-axis">
+            <span class="kicker">Dial one · model</span>
+            <p>Who is reasoning: a generalist, an expert, or a specialist. Changes what the
+              answer is capable of being.</p>
+          </div>
+          <div class="guide-axis">
+            <span class="kicker">Dial two · effort</span>
+            <p>How hard that one model works before answering. Changes the token spend far
+              more than it changes the model.</p>
+          </div>
+        </div>
+        <p class="guide-lede gap-above">
+          They compose. A top-tier model at <i>low</i> effort is a real and useful combination —
+          five minutes with the expert, who still brings the pattern recognition even when it
+          is not spending deep tokens per step.
+        </p>
+      </div>
+
+      <div class="card guide-provider guide-claude">
+        <div class="card-head">
+          <h2>Claude</h2>
+          <span class="meta">Claude Code · claude.ai</span>
+        </div>
+        <div class="guide-rows">
+
+          <div class="guide-row">
+            <div class="guide-head">
+              <span class="guide-name">Haiku 4.5</span>
+              <span class="guide-cost" role="img" aria-label="Cost: 1 of 3"><i class="is-on"></i><i></i><i></i></span>
+            </div>
+            <div class="guide-what">The small, fast one. Narrow mechanical work where the answer is
+              already obvious and only the typing is slow.</div>
+            <div class="guide-when"><b>Reach for it when</b> you are renaming things, reformatting,
+              extracting a value, or handing a subagent grunt work you will check yourself.</div>
+          </div>
+
+          <div class="guide-row">
+            <div class="guide-head">
+              <span class="guide-name">Sonnet 5</span>
+              <span class="badge">Default</span>
+              <span class="guide-cost" role="img" aria-label="Cost: 2 of 3"><i class="is-on"></i><i class="is-on"></i><i></i></span>
+            </div>
+            <div class="guide-what">Everyday coding, writing, research, agentic tool use. This is where
+              you live by default.</div>
+            <div class="guide-when"><b>Step away from it only</b> when the task clearly outgrows it —
+              not because a task merely sounds important.</div>
+          </div>
+
+          <div class="guide-row">
+            <div class="guide-head">
+              <span class="guide-name">Opus 5</span>
+              <span class="guide-cost is-top" role="img" aria-label="Cost: 3 of 3"><i class="is-on"></i><i class="is-on"></i><i class="is-on"></i></span>
+            </div>
+            <div class="guide-what">The expert. Cross-cutting refactors, hard debugging, architecture
+              calls — problems where a wrong answer costs more than the tokens.</div>
+            <div class="guide-when"><b>Reach for it when</b> being wrong is expensive, the run is long
+              and autonomous with no check-ins, or the problem is genuinely novel rather than a
+              variation on something already seen.</div>
+          </div>
+
+          <div class="guide-row">
+            <div class="guide-head">
+              <span class="guide-name">Fable 5.1</span>
+              <span class="guide-cost is-top" role="img" aria-label="Cost: 3 of 3"><i class="is-on"></i><i class="is-on"></i><i class="is-on"></i></span>
+            </div>
+            <div class="guide-what">The specialist. You describe the result, not the path, and it
+              works out the steps you would otherwise have had to specify.</div>
+            <div class="guide-when"><b>Reach for it when</b> the outcome matters more than the
+              procedure: root-cause investigations, ambiguous outages, work you would normally
+              break into pieces because no single sitting covers it.</div>
+          </div>
+
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Effort</h2>
+          <span class="meta">The dial that actually moves the bill</span>
+        </div>
+        <p class="guide-lede flush">
+          Effort is set per turn and applies across the models that support it. Moving it one
+          notch changes spend more than most model swaps do.
+        </p>
+        <div class="effort">
+
+          <div class="effort-row">
+            <span class="effort-name">low</span>
+            <span class="effort-gauge" role="img" aria-label="Effort 1 of 5"><i class="is-on"></i><i></i><i></i><i></i><i></i></span>
+            <span class="effort-what">Most efficient, and a real reduction in capability.</span>
+            <span class="effort-for">Short, scoped, latency-sensitive work — not
+              intelligence-sensitive. Good for subagents.</span>
+          </div>
+
+          <div class="effort-row">
+            <span class="effort-name">medium</span>
+            <span class="effort-gauge" role="img" aria-label="Effort 2 of 5"><i class="is-on"></i><i class="is-on"></i><i></i><i></i><i></i></span>
+            <span class="effort-what">Moderate token savings, balanced.</span>
+            <span class="effort-for">Cost-sensitive work that can afford to trade away some
+              intelligence. The average-workflow drop-in.</span>
+          </div>
+
+          <div class="effort-row">
+            <span class="effort-name">high</span>
+            <span class="effort-gauge" role="img" aria-label="Effort 3 of 5"><i class="is-on"></i><i class="is-on"></i><i class="is-on"></i><i></i><i></i></span>
+            <span class="effort-what">The default almost everywhere.</span>
+            <span class="effort-for">Complex reasoning, difficult coding, agentic tasks. This one is
+              simply “normal” — not a treat.</span>
+          </div>
+
+          <div class="effort-row">
+            <span class="effort-name">xhigh</span>
+            <span class="effort-gauge" role="img" aria-label="Effort 4 of 5"><i class="is-on"></i><i class="is-on"></i><i class="is-on"></i><i class="is-on"></i><i></i></span>
+            <span class="effort-what">Extended capability, higher spend.</span>
+            <span class="effort-for">The hardest coding and agentic tasks, and long-running work —
+              half an hour and up, on million-token budgets.</span>
+          </div>
+
+          <div class="effort-row">
+            <span class="effort-name">max</span>
+            <span class="effort-gauge" role="img" aria-label="Effort 5 of 5"><i class="is-on"></i><i class="is-on"></i><i class="is-on"></i><i class="is-on"></i><i class="is-on"></i></span>
+            <span class="effort-what">No constraints on token spending.</span>
+            <span class="effort-for">Frontier problems only. Everywhere else it buys diminishing
+              returns and risks overthinking a solved question.</span>
+          </div>
+
+        </div>
+        <p class="tile-note gap-above">
+          <b>ultracode</b> is a different kind of switch, and Claude Code only: xhigh effort plus
+          standing permission to fan work out across parallel subagents. It is not a
+          “how hard should it think” dial, it is a “should this fan out” dial — worth it for large
+          tasks that split into independent chunks, wasteful for anything that does not.
+        </p>
+      </div>
+
+      <div class="card guide-provider guide-codex">
+        <div class="card-head">
+          <h2>Codex</h2>
+          <span class="meta">OpenAI · CLI and IDE</span>
+        </div>
+        <div class="guide-rows">
+
+          <div class="guide-row">
+            <div class="guide-head">
+              <span class="guide-name">GPT-6 Astra</span>
+              <span class="guide-cost is-top" role="img" aria-label="Cost: 3 of 3"><i class="is-on"></i><i class="is-on"></i><i class="is-on"></i></span>
+            </div>
+            <div class="guide-what">The model Sessions prices for you. Published Standard API rates
+              are $10 per million input tokens, $1 cached, $50 output.</div>
+            <div class="guide-when"><b>Output is the expensive half</b> — fifty times cached input.
+              A turn that reasons briefly and writes a long file costs more than one that reads
+              widely and answers in a paragraph.</div>
+          </div>
+
+          <div class="guide-row">
+            <div class="guide-head">
+              <span class="guide-name">Cached input</span>
+              <span class="guide-cost" role="img" aria-label="Cost: 1 of 3"><i class="is-on"></i><i></i><i></i></span>
+            </div>
+            <div class="guide-what">Re-sent context the provider already holds is billed at a tenth
+              of fresh input.</div>
+            <div class="guide-when"><b>This rewards staying put.</b> Continuing one long chat keeps
+              the prefix cached; starting a fresh chat on the same task re-reads everything at
+              full price.</div>
+          </div>
+
+          <div class="guide-row">
+            <div class="guide-head">
+              <span class="guide-name">Past 272k tokens</span>
+              <span class="guide-cost is-top" role="img" aria-label="Cost: 3 of 3"><i class="is-on"></i><i class="is-on"></i><i class="is-on"></i></span>
+            </div>
+            <div class="guide-what">A hard cost cliff: beyond 272,000 input tokens, input bills at
+              double and output at one and a half times.</div>
+            <div class="guide-when"><b>Watch the context figure in Sessions.</b> Compacting or
+              splitting the task before the cliff is the single largest saving available on this
+              provider.</div>
+          </div>
+
+          <div class="guide-row">
+            <div class="guide-head">
+              <span class="guide-name">Reasoning effort</span>
+              <span class="guide-cost" role="img" aria-label="Cost: 2 of 3"><i class="is-on"></i><i class="is-on"></i><i></i></span>
+            </div>
+            <div class="guide-what">Codex exposes the same kind of dial as Claude, and it behaves the
+              same way.</div>
+            <div class="guide-when"><b>Leave it at the default</b> for ordinary work and raise it
+              deliberately, for one hard task, rather than setting it high and forgetting.</div>
+          </div>
+
+        </div>
+      </div>
+
+      <div class="card guide-provider guide-cursor">
+        <div class="card-head">
+          <h2>Cursor</h2>
+          <span class="meta">Editor · metered by request</span>
+        </div>
+        <div class="guide-rows">
+
+          <div class="guide-row">
+            <div class="guide-head">
+              <span class="guide-name">Tab</span>
+              <span class="guide-cost" role="img" aria-label="Cost: 1 of 3"><i class="is-on"></i><i></i><i></i></span>
+            </div>
+            <div class="guide-what">Inline completion as you type. The cheapest useful thing in the
+              editor by a wide margin.</div>
+            <div class="guide-when"><b>Most edits never needed an agent.</b> If you already know what
+              the line should say, typing it with Tab costs a rounding error of what asking
+              costs.</div>
+          </div>
+
+          <div class="guide-row">
+            <div class="guide-head">
+              <span class="guide-name">Ask</span>
+              <span class="guide-cost" role="img" aria-label="Cost: 1 of 3"><i class="is-on"></i><i></i><i></i></span>
+            </div>
+            <div class="guide-what">Answers a question about the code without editing anything.</div>
+            <div class="guide-when"><b>Use it when you want to understand, not change.</b> An agent
+              run that reads, plans, edits and re-reads costs many times a plain answer.</div>
+          </div>
+
+          <div class="guide-row">
+            <div class="guide-head">
+              <span class="guide-name">Agent</span>
+              <span class="guide-cost is-top" role="img" aria-label="Cost: 3 of 3"><i class="is-on"></i><i class="is-on"></i><i class="is-on"></i></span>
+            </div>
+            <div class="guide-what">Reads, edits and iterates across files on its own. Every loop is
+              another metered request.</div>
+            <div class="guide-when"><b>Scope it before you run it.</b> Pointing at the two files that
+              matter costs a fraction of letting it search the repository to find them.</div>
+          </div>
+
+          <div class="guide-row">
+            <div class="guide-head">
+              <span class="guide-name">Auto</span>
+              <span class="guide-cost" role="img" aria-label="Cost: 2 of 3"><i class="is-on"></i><i class="is-on"></i><i></i></span>
+            </div>
+            <div class="guide-what">Lets Cursor route the request instead of pinning a frontier model
+              to every message.</div>
+            <div class="guide-when"><b>A reasonable default</b> when you are not sure the task needs
+              the top model. Pin one deliberately when it does.</div>
+          </div>
+
+        </div>
+      </div>
+
+      <div class="card guide-provider guide-other">
+        <div class="card-head">
+          <h2>Everything else</h2>
+          <span class="meta">Copilot · Gemini · the rest</span>
+        </div>
+        <div class="guide-rows">
+
+          <div class="guide-row">
+            <div class="guide-head">
+              <span class="guide-name">Find the metered unit</span>
+            </div>
+            <div class="guide-what">Every assistant bills something different: tokens, requests,
+              premium requests, or a seat with a fair-use ceiling.</div>
+            <div class="guide-when"><b>Learn which one you pay in first.</b> On a per-request plan,
+              one long careful message beats five short ones; on a per-token plan the reverse is
+              often true.</div>
+          </div>
+
+          <div class="guide-row">
+            <div class="guide-head">
+              <span class="guide-name">Premium vs included</span>
+            </div>
+            <div class="guide-what">Most tools keep a cheap or included tier alongside the models
+              that draw down a premium allowance.</div>
+            <div class="guide-when"><b>The included tier is usually enough</b> for completion,
+              explanation and small edits. Spend the premium allowance on the work that is
+              actually hard.</div>
+          </div>
+
+          <div class="guide-row">
+            <div class="guide-head">
+              <span class="guide-name">Free tiers are real</span>
+            </div>
+            <div class="guide-what">Several vendors give a daily allowance that resets whether or not
+              you used it.</div>
+            <div class="guide-when"><b>Spend the free one first.</b> Routine work done on an allowance
+              that expires anyway is work your paid quota never sees.</div>
+          </div>
+
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Habits that cost nothing</h2></div>
+        <div class="habits">
+
+          <div class="habit">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 21V4"/><path d="M5 11l7-7 7 7"/>
+            </svg>
+            <div class="habit-title">Start low, escalate on evidence</div>
+            <div class="habit-body">Opening every task on the biggest model at the highest effort is
+              how a quota disappears. Start at the default and move up when the default visibly
+              struggles — not when the task merely sounds hard.</div>
+          </div>
+
+          <div class="habit">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M4 6h16M4 12h10M4 18h6"/>
+            </svg>
+            <div class="habit-title">Narrow the context before you ask</div>
+            <div class="habit-body">Naming the files costs you ten seconds and saves a search across
+              the whole repository. Context is the input bill, and input is charged on every turn
+              of a long conversation, not just the first.</div>
+          </div>
+
+          <div class="habit">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/>
+            </svg>
+            <div class="habit-title">One long chat beats five fresh ones</div>
+            <div class="habit-body">Re-sent context is discounted; re-explaining a task from scratch
+              is not. Stay in the session while the topic holds, and open a new one when the topic
+              genuinely changes rather than out of tidiness.</div>
+          </div>
+
+          <div class="habit">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="9"/><path d="M12 8v4.4l2.8 1.8"/>
+            </svg>
+            <div class="habit-title">Spend against the reset, not the day</div>
+            <div class="habit-body">Quota that expires unused is quota wasted. Limits &amp; resets
+              shows when each window turns over; heavy work parked just before a reset gets a full
+              allowance instead of the end of one.</div>
+          </div>
+
+        </div>
+        <p class="guide-foot gap-above">
+          Model names and rates change. This card is written by hand, not fetched — treat it as a
+          rule of thumb and check the provider when a number matters. The Codex rates shown are
+          the published Standard API rates recorded in this app on 20 September 2026;
+          API-equivalent token value is not money charged to a subscription.
+        </p>
+      </div>
+
     </section>
 
   </main>
