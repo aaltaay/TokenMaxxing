@@ -11,3 +11,5 @@ _attr*.py
 _lookup*.py
 _usage_*.json
 cycle-cache.json
+reset-schedule.json
+reset-buzzed.json

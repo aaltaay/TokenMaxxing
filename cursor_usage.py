@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -18,7 +19,7 @@ from pathlib import Path
 CACHE_TTL_S = 180
 DASHBOARD = "https://cursor.com"
 API2 = "https://api2.cursor.sh"
-USER_AGENT = "cursor-token-hud/2.0"
+USER_AGENT = "token-hud/2.0"
 OVERHEAD_IDS = ("system_prompt", "tools", "rules", "skills", "mcp", "subagents")
 CURSOR_MODEL_HINTS = (
     "cursor-grok",
@@ -38,8 +39,15 @@ def cursor_state_db() -> Path:
     return home / ".config" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
 
 
+def hud_dir() -> Path:
+    override = os.environ.get("TOKEN_HUD_DIR")
+    if override:
+        return Path(override)
+    return Path.home() / ".cursor" / "token-hud"
+
+
 def cache_path() -> Path:
-    return Path.home() / ".cursor" / "token-hud" / "cycle-cache.json"
+    return hud_dir() / "cycle-cache.json"
 
 
 def connect(db: Path | None = None) -> sqlite3.Connection:
