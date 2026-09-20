@@ -110,6 +110,10 @@ python reset_schedule.py --mark-session claude
 python token_hud.py --test-buzz
 ```
 
+## UI
+
+The HUD uses an Apple-inspired dark layout: near-black chrome (`#1c1c1e`), grouped cards, segmented tabs, thin capsule meters, and monospaced numbers. Visual / interaction polish only -- cycle fetch, chat follow, reset countdowns, Test buzz, and the single-instance lock are unchanged.
+
 ## Requirements
 
 - Python 3.10+ (stdlib only: `tkinter`, `sqlite3`, `urllib`; `winsound` on Windows; `zoneinfo` with a built-in Eastern fallback)
