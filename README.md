@@ -49,7 +49,9 @@ Claude Code runs a status line for the session in front of you and hands it that
 }
 ```
 
-The status line writes only a session id, model name, token counters, and reported cost to `~/.tokenmaxxing/claude-active.json` (override the folder with `TOKENMAXXING_HOME`). No prompt text, transcript content, file path, or keystroke is read or stored. Without it, Claude Code sessions still work through **Latest activity** and manual selection.
+The status line writes only a session id, model name, token counters, and reported cost to `~/.tokenmaxxing/claude-active.json` (override the folder with `TOKENMAXXING_HOME`). No prompt text, transcript content, file path, or keystroke is read or stored. Without it (the Claude desktop app does not run status lines), **Open Claude Code session** follows the Claude Code log written to in the last 15 minutes and says so; older logs are never shown as open. **Latest activity** and manual selection also work.
+
+Claude sessions show an **estimated session cost in USD** priced from the transcript's own usage records at Anthropic's published API rates (checked September 20, 2026): uncached input, cache reads, cache writes, and output, once per request. When the status line is running, Claude Code's own reported cost replaces the estimate. This is API-equivalent value, not money charged to a subscription; unknown models are left unpriced and reported as a partial estimate.
 
 ## Connect your accounts
 

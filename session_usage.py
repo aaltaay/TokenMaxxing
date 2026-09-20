@@ -14,6 +14,10 @@ LIST_LIMIT = 100
 # A status line reports the chat a person is actually typing in. Anything
 # older than this is treated as unknown rather than followed.
 POINTER_MAX_AGE = 600
+# Without a status line (the Claude desktop app never runs one), the Claude
+# Code log written to most recently is the session in use. A log idle for
+# longer than this is background history, not an open chat.
+RECENT_LOG_SECONDS = 900
 
 _lock = threading.Lock()
 _cache = {}
@@ -222,9 +226,9 @@ def _detail(provider, selected):
         detailed.pop('_path', None)
         detailed['name'] = selected.get('name') or detailed.get('name')
         selected = detailed
-    if provider == 'codex':
+    if provider in ('codex', 'claude'):
         try:
-            selected['cost'] = session_cost.estimate_file(path)
+            selected['cost'] = session_cost.estimate_file(path, provider)
         except (OSError, ValueError, TypeError):
             selected['cost'] = None
     return selected
@@ -278,12 +282,17 @@ def get_sessions(provider='codex', pinned=None, follow='latest', active_title=No
         else: sessions=cached[1]
     sessions = [{**s, 'name': f"{titles[s['id']]} · {s['id'][:8]}" if s['id'] in titles else s['name']} for s in sessions]
     selected = next((s for s in sessions if s['id']==target),None) if target else (None if active else next(iter(sessions),None))
+    follow_source = 'status line' if pointer and selected else None
+    if active and provider == 'claude' and not selected and not pointer and sessions:
+        newest = sessions[0]
+        modified = numeric(newest.get('updated_at'))
+        if modified is not None and time.time() - modified <= RECENT_LOG_SECONDS:
+            selected, follow_source = newest, 'recent log'
     reason = 'Pinned session is unavailable. Choose another session.' if pinned else 'No local session records found for this provider.'
     if active and not selected:
         if provider == 'claude':
             reason = ('Open Claude Code session has no local log yet. Choose a session manually.' if pointer else
-                      'Open Claude Code session could not be detected. Add the TOKENMAXXING status line to '
-                      'Claude Code, or choose a session manually.')
+                      'No Claude Code session has been active in the last 15 minutes. Open one, or choose a session manually.')
         else:
             reason = ('More than one local chat has this title. Select the chat manually.' if len(matches) > 1 else
                       'Open chat has no matching local session record. Select a chat manually.' if active_title else
@@ -294,5 +303,6 @@ def get_sessions(provider='codex', pinned=None, follow='latest', active_title=No
             selected = _claude_live(selected, pointer or active_pointer('claude'))
     return {'available':True, 'provider':provider, 'pinned':pinned,
             'selection_mode': 'pinned' if pinned else 'active' if active else 'latest',
+            'follow_source': follow_source,
             'chats':[{'id':s['id'],'name':s['name']} for s in sessions], 'chat':dict(selected) if selected else None,
             'reason':reason}

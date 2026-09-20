@@ -688,17 +688,20 @@ function renderChat() {
   billed.replaceChildren();
   $('chatTax').textContent = '—';
   $('sessionCostTitle').textContent = provider === 'cursor' ? 'Recorded usage value for this session'
-    : provider === 'claude' ? 'Reported session cost' : 'Estimated session cost';
+    : local?.chat?.cost?.reported ? 'Reported session cost' : 'Estimated session cost';
   $('sessionCostScope').textContent = provider === 'cursor' ? 'this cycle' : 'USD · session log';
   const followProvider = provider === 'codex' ? state.activeChatSupported : provider === 'claude';
   const followsOpen = isAuto ? state.autoActive : (followProvider && state.sessionFollow === 'active');
   const openLabel = provider === 'claude' ? 'Open Claude Code session' : 'Open Codex chat';
   $('sessionFollowRow').hidden = isAuto || !followProvider;
   $('sessionFollowOpen').textContent = openLabel;
+  // A Claude session found through its log rather than the status line is
+  // said so: it is the chat being written to, not a chat seen on screen.
+  const claudeOpen = local?.follow_source === 'recent log' ? 'Claude Code session active in the last 15 minutes' : 'open Claude Code session';
   $('sessionMode').textContent = state.pinned ? 'Pinned session · stays on your selected chat.'
-    : isAuto ? (state.autoActive ? `Auto · following the ${provider === 'claude' ? 'open Claude Code session' : 'open Codex chat'}.`
+    : isAuto ? (state.autoActive ? `Auto · following the ${provider === 'claude' ? claudeOpen : 'open Codex chat'}.`
                                   : 'Auto · no open Codex or Claude Code chat detected right now.')
-    : followsOpen ? `Following the ${provider === 'claude' ? 'open Claude Code session' : 'open Codex chat'} · updates when you switch chats.`
+    : followsOpen ? `Following the ${provider === 'claude' ? claudeOpen : 'open Codex chat'} · updates when you switch chats.`
     : 'Latest activity · follows the most recently updated session, including background tasks.';
   $('btnUnpin').textContent = followsOpen ? openLabel : 'Latest activity';
   $('sessionBreakdownTitle').textContent = provider === 'cursor' ? 'Estimated context breakdown' : 'Recorded token usage';
