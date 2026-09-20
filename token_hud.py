@@ -100,7 +100,7 @@ class TokenHud:
         self.root.configure(bg=BG)
         self.root.attributes("-topmost", True)
         self.root.resizable(True, True)
-        self.root.geometry("560x760+40+60")
+        self.root.geometry("600x780+40+60")
 
         self._style()
 
@@ -340,7 +340,7 @@ class TokenHud:
 
         self.reset_rows: dict[tuple[str, str], dict] = {}
         for provider, title in (("claude", "Claude"), ("codex", "Codex/ChatGPT")):
-            card = tk.Frame(self.tab_resets, bg=CARD)
+            card = tk.Frame(self.tab_resets, bg=CARD, highlightbackground="#44403c", highlightthickness=1)
             card.pack(fill="x", padx=10, pady=6)
             tk.Label(card, text=title, bg=CARD, fg=ACCENT, font=("Segoe UI", 10, "bold"), anchor="w").pack(
                 fill="x", padx=10, pady=(8, 2)
@@ -365,12 +365,10 @@ class TokenHud:
                 ).pack(side="left")
                 countdown = tk.Label(row, text="--", bg=CARD, fg=FG, font=("Cascadia Mono", 10), width=14, anchor="w")
                 countdown.pack(side="left")
-                nxt = tk.Label(row, text="", bg=CARD, fg=DIM, font=("Segoe UI", 8), anchor="w")
-                nxt.pack(side="left", fill="x", expand=True)
                 if kind == "session":
                     tk.Button(
                         row,
-                        text="Mark session now",
+                        text="I just reset",
                         command=lambda p=provider: self._mark_session(p),
                         bg="#44403c",
                         fg=FG,
@@ -378,10 +376,10 @@ class TokenHud:
                         font=("Segoe UI", 8),
                     ).pack(side="right")
                 extra = tk.Label(
-                    card, text="", bg=CARD, fg=DIM, font=("Segoe UI", 8), anchor="w", wraplength=500, justify="left"
+                    card, text="", bg=CARD, fg=DIM, font=("Segoe UI", 8), anchor="w", wraplength=520, justify="left"
                 )
                 extra.pack(fill="x", padx=18, pady=(0, 2))
-                self.reset_rows[(provider, kind)] = {"enabled": var, "countdown": countdown, "next": nxt, "extra": extra}
+                self.reset_rows[(provider, kind)] = {"enabled": var, "countdown": countdown, "extra": extra}
             last = tk.Label(card, text="Last buzzed: never", bg=CARD, fg=DIM, font=("Segoe UI", 8), anchor="w")
             last.pack(fill="x", padx=10, pady=(2, 8))
             self.reset_rows[(provider, "last")] = {"last": last}
@@ -637,17 +635,14 @@ class TokenHud:
             widgets["enabled"].set(view.enabled)
             if view.needs_anchor:
                 widgets["countdown"].configure(text="mark session", fg=DIM)
-                widgets["next"].configure(text="no 5h clock until you mark")
+                extra = "No 5h clock until you click I just reset."
             elif not view.enabled:
                 widgets["countdown"].configure(text="off", fg=DIM)
-                widgets["next"].configure(text=f"next {fmt_et(view.next_at)}" if view.next_at else "--")
+                extra = f"Muted. Would fire {fmt_et(view.next_at)}" if view.next_at else view.note
             else:
                 color = WARN if view.remaining_s is not None and view.remaining_s <= 120 else FG
                 widgets["countdown"].configure(text=fmt_countdown(view.remaining_s), fg=color)
-                widgets["next"].configure(text=f"next {fmt_et(view.next_at)}")
-            extra = view.note
-            if view.kind == "session":
-                extra = f"{view.note}. Click Mark session now when a window starts."
+                extra = f"next {fmt_et(view.next_at)}  ·  {view.note}"
             widgets["extra"].configure(text=extra)
             if view.last_buzz:
                 last_by.setdefault(view.provider, []).append(
@@ -722,7 +717,9 @@ class TokenHud:
             padx=16, pady=(0, 12)
         )
         self.root.update_idletasks()
-        win.geometry(f"+{self.root.winfo_rootx() + 16}+{self.root.winfo_rooty() + 16}")
+        x = self.root.winfo_rootx() + self.root.winfo_width() + 8
+        y = self.root.winfo_rooty() + 16
+        win.geometry(f"+{x}+{y}")
         win.after(7000, win.destroy)
 
     def run(self) -> None:

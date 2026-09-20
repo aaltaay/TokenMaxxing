@@ -45,7 +45,7 @@ Cache tokens are not stored in `promptTokenBreakdown`. Cycle-tab cache-read tota
 
 | You see | What it is |
 |---|---|
-| Claude / Codex Session | Countdown to the next 5-hour provider window (starts after you click **Mark session now**, or after you set `session_anchor` in the JSON) |
+| Claude / Codex Session | Countdown to the next 5-hour provider window (starts after you click **I just reset**, or after you set `session_anchor` in the JSON) |
 | Claude / Codex Weekly | Countdown to the next weekly reset (weekday + clock in `America/New_York`) |
 | Enabled checkbox | Per-meter mute. Saved back into the JSON |
 | Last buzzed | When this HUD last fired sound + banner for that meter |
