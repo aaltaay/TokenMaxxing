@@ -61,8 +61,9 @@ def pct_kind(pct: float) -> str:
 
 # ── commands ──────────────────────────────────────────────────────────────
 
-def cmd_sessions(provider: str = 'codex', pinned: str | None = None) -> dict:
-    result = session_usage.get_sessions(provider, pinned)
+def cmd_sessions(provider: str = 'codex', pinned: str | None = None,
+                 follow: str = 'latest', active_title: str | None = None) -> dict:
+    result = session_usage.get_sessions(provider, pinned, follow, active_title)
     if provider == 'cursor' and result.get('chat'):
         result['chat']['cat_rows'] = _chat_categories(result['chat'])
     return result

@@ -6,7 +6,7 @@ The Electron window reads data through a Python bridge.
 ## What it shows
 
 - **Overview:** Cursor quota percentages, reported cycle usage value, token totals, and recorded event counts; Codex and Claude quota percentages when their services return them.
-- **Sessions:** choose Codex, Claude Code, or Cursor, then follow latest local activity or pin a session. Selection is saved across restarts. This does not track the foreground window. Codex and Claude show the last recorded request's token usage; Cursor shows its saved context snapshot and estimated category breakdown. Unknown metrics remain unavailable.
+- **Sessions:** choose Codex, Claude Code, or Cursor. On Windows, Codex defaults to **Open Codex chat**, matching the desktop's accessible document title to the local session index. Switching chats changes the displayed session within a few seconds, even when background tasks are running. **Latest activity** follows the newest log instead; selecting a session pins it. Selection is saved across restarts. Codex and Claude show the last recorded request's token usage; Cursor shows its saved context snapshot and estimated category breakdown. Unknown metrics remain unavailable.
 - **Resets:** reset times returned by the provider alongside the relevant usage percentage. A countdown is time until a reported reset, not an allowance of working hours.
 
 Missing values display as unavailable. A failed connection, missing quota field, or expired reading never becomes a zero-percent meter or a guessed countdown. Last-known Cursor snapshots carry their age and stale status.
@@ -70,7 +70,7 @@ start.bat          Windows
 
 The launcher installs Electron dependencies on first run. Alternatively, run `npm install` and `npm start` inside `app/`.
 
-The app refreshes data automatically. Use the title-bar refresh button to request a fresh account reading. In Sessions, **Latest activity** follows the most recently updated local session for the selected provider; choosing a session pins it. Up to 100 recent session files are inspected, using bounded log tails. Subagent logs are excluded. Missing token records do not become zero usage, and request usage is not presented as live context occupancy. Cursor selection skips chat headers with missing stored data.
+The app refreshes data automatically. Use the title-bar refresh button to request a fresh account reading. In Sessions, **Open Codex chat** uses a read-only Windows accessibility helper that reads only the Codex document title, never transcript text or keyboard input. An unavailable title, duplicate title, cloud chat, or missing local record shows unavailable rather than a background task's usage. When several Codex windows are visible, the focused one is used; an ambiguous selection is unavailable. This depends on Codex's current accessibility layout; other platforms retain **Latest activity**. Choosing a session pins it; the follow button resumes the selected automatic mode. Up to 100 recent session files plus an explicitly matched older session are inspected using bounded log tails. Subagent logs are excluded. Missing token records do not become zero usage, and request usage is not presented as live context occupancy. Cursor selection skips chat headers with missing stored data.
 
 ## Local storage and credentials
 

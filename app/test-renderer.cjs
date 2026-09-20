@@ -14,6 +14,30 @@ function renderer() {
   return expression => vm.runInContext(expression,context);
 }
 
+test('changing follow mode while a read is pending discards the old selection', async () => {
+  const run = renderer();
+  run(`
+    renderChat = () => {};
+    const sessionCalls = [], sessionReplies = [];
+    window.hud.call = (cmd,args) => {
+      sessionCalls.push(args);
+      return new Promise(resolve => sessionReplies.push(resolve));
+    };
+    state.sessionFollow='latest';
+    const pendingSession = refreshLocal();
+    state.sessionFollow='active';
+    state.local=null;
+  `);
+  await run('refreshLocal()');
+  run(`sessionReplies.shift()({chat:{id:'background',used:999}})`);
+  await run('pendingSession');
+  assert.equal(run('state.local'),null);
+  assert.equal(run('sessionCalls[1].follow'),'active');
+  run(`sessionReplies.shift()({chat:{id:'open',used:123}})`);
+  await run('Promise.resolve()');
+  assert.equal(run('state.local.chat.id'),'open');
+});
+
 test('missing metrics remain unavailable while actual zero remains zero', () => {
   const run = renderer();
   assert.equal(run('pct(null)'), '—');

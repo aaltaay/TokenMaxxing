@@ -8,6 +8,9 @@ const { ProviderLinkManager } = require('./provider-link');
 const { ResetAttention } = require('./reset-attention');
 const { SmsAlerts } = require('./sms-alerts');
 const { Updates } = require('./updates');
+const { ActiveChat } = require('./active-chat');
+const activeChat = new ActiveChat({script: app.isPackaged
+  ? path.join(process.resourcesPath, 'active-chat.ps1') : path.join(__dirname, 'active-chat.ps1')});
 let updates = null;
 let sms = null;
 let smsQueue = Promise.resolve();
@@ -266,6 +269,7 @@ function startBridge() {
 
 ipcMain.handle('engine:call', async (_event, cmd, args) => {
   if (!bridge) throw new Error('engine not started');
+  if (cmd === 'sessions') args = {...args, active_title: activeChat.currentTitle()};
   // The cycle fetch pages the dashboard and can legitimately run long.
   const timeout = cmd === 'cycle' ? 180000 : cmd === 'providers' ? 45000 : 30000;
   return bridge.call(cmd, args || {}, timeout);
@@ -353,6 +357,7 @@ if (!app.requestSingleInstanceLock()) {
     sms = new SmsAlerts({filename: path.join(app.getPath('userData'), 'twilio-credentials.enc'), storage: safeStorage});
     createWindow();
     startBridge();
+    activeChat.start();
     updates.start();
     watchExistingConnections();
     alertPoll = setInterval(pollResetAlerts, 5000);
@@ -366,6 +371,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('before-quit', () => {
+    activeChat.stop();
     updates?.stop();
     clearInterval(alertPoll);
     attention.dismiss();

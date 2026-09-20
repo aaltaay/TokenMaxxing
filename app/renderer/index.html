@@ -95,10 +95,14 @@
           <label for="sessionProvider">Provider</label>
           <select class="select" id="sessionProvider"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="cursor">Cursor</option></select>
         </div>
-        <p class="tile-note" id="sessionMode">Latest activity · follows recent local records, not the foreground window.</p>
+        <div class="row-actions" id="sessionFollowRow">
+          <label for="sessionFollow">Follow</label>
+          <select class="select" id="sessionFollow"><option value="active">Open Codex chat</option><option value="latest">Latest activity</option></select>
+        </div>
+        <p class="tile-note" id="sessionMode">Following the open Codex chat.</p>
         <div class="chat-picker">
           <select class="select" id="chatSelect" aria-label="Chat to follow"></select>
-          <button class="chip" id="btnUnpin">Latest activity</button>
+          <button class="chip" id="btnUnpin">Follow open chat</button>
         </div>
         <div id="chatBody"></div>
       </div>

@@ -57,6 +57,7 @@
 .update-strip { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 16px; border-top: 1px solid var(--hairline); color: var(--ink-2); font-size: 12px; }
 .update-strip .chip { flex-shrink: 0; }
 .update-strip [hidden] { display: none; }
+#sessionFollowRow[hidden] { display: none; }
 
 * { box-sizing: border-box; }
 

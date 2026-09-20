@@ -29,6 +29,8 @@ const state = {
   links: {},
   pinned: null,
   sessionProvider: 'codex',
+  sessionFollow: 'active',
+  activeChatSupported: true,
   localFetching: false,
   focus: null,
   view: 'overview',
@@ -523,7 +525,7 @@ function renderTiles() {
 // ── this chat ─────────────────────────────────────────────────────────────
 
 function saveSessionChoice() {
-  try { localStorage.setItem('sessionChoice', JSON.stringify({provider:state.sessionProvider,pinned:state.pinned})); }
+  try { localStorage.setItem('sessionChoice', JSON.stringify({provider:state.sessionProvider,pinned:state.pinned,follow:state.sessionFollow})); }
   catch { /* Persistence is optional; current selection remains active. */ }
 }
 
@@ -537,7 +539,12 @@ function renderChat() {
   cats.replaceChildren();
   billed.replaceChildren();
   $('chatTax').textContent = '—';
-  $('sessionMode').textContent = `${state.pinned ? 'Pinned session' : 'Latest activity'} · follows recent local records, not the foreground window.`;
+  const followsOpen = state.sessionProvider === 'codex' && state.sessionFollow === 'active';
+  $('sessionFollowRow').hidden = state.sessionProvider !== 'codex' || !state.activeChatSupported;
+  $('sessionMode').textContent = state.pinned ? 'Pinned session · stays on your selected chat.' : followsOpen
+    ? 'Following the open Codex chat · updates when you switch chats.'
+    : 'Latest activity · follows the most recently updated session, including background tasks.';
+  $('btnUnpin').textContent = followsOpen ? 'Follow open chat' : 'Latest activity';
   $('sessionBreakdownTitle').textContent = state.sessionProvider === 'cursor' ? 'Estimated context breakdown' : 'Recorded token usage';
 
   const picker = document.querySelector('.chat-picker');
@@ -561,7 +568,7 @@ function renderChat() {
     select.dataset.signature = signature;
     select.replaceChildren(...(local.chats || []).map((c) => el('option', { value: c.id, text: c.name })));
   }
-  if (local.chat?.id) select.value = local.chat.id;
+  select.value = local.chat?.id || '';
 
   const chat = local.chat;
   if (!chat || chat.error) {
@@ -858,19 +865,20 @@ async function refreshLocal() {
   if (state.localFetching) return;
   const provider = state.sessionProvider;
   const pinned = state.pinned;
+  const follow = state.sessionFollow;
   state.localFetching = true;
   try {
-    const result = await window.hud.call('sessions', {provider, pinned});
-    if (provider !== state.sessionProvider || pinned !== state.pinned) return;
+    const result = await window.hud.call('sessions', {provider, pinned, follow});
+    if (provider !== state.sessionProvider || pinned !== state.pinned || follow !== state.sessionFollow) return;
     state.local = result;
     renderChat();
   } catch (err) {
-    if (provider !== state.sessionProvider || pinned !== state.pinned) return;
+    if (provider !== state.sessionProvider || pinned !== state.pinned || follow !== state.sessionFollow) return;
     state.local = {available:false,reason:`Local read failed: ${engineMessage(err)}`};
     renderChat();
   } finally {
     state.localFetching = false;
-    if (provider !== state.sessionProvider || pinned !== state.pinned) refreshLocal();
+    if (provider !== state.sessionProvider || pinned !== state.pinned || follow !== state.sessionFollow) refreshLocal();
   }
 }
 
@@ -918,11 +926,15 @@ async function boot() {
   });
   $('chatSelect').addEventListener('change', (e) => {
     state.pinned = e.target.value;
+    state.local = {available:false,reason:'Loading selected session…'};
+    renderChat();
     saveSessionChoice();
     refreshLocal();
   });
   $('btnUnpin').addEventListener('click', () => {
     state.pinned = null;
+    state.local = {available:false,reason:'Finding session…'};
+    renderChat();
     saveSessionChoice();
     refreshLocal();
   });
@@ -930,7 +942,19 @@ async function boot() {
     const saved = JSON.parse(localStorage.getItem('sessionChoice') || '{}');
     if (['codex','claude','cursor'].includes(saved.provider)) state.sessionProvider = saved.provider;
     if (typeof saved.pinned === 'string') state.pinned = saved.pinned;
-  } catch { /* Invalid preference uses latest Codex activity. */ }
+    if (['active','latest'].includes(saved.follow)) state.sessionFollow = saved.follow;
+  } catch { /* Invalid preference follows the open Codex chat. */ }
+  state.activeChatSupported = platform === 'win32';
+  if (!state.activeChatSupported) state.sessionFollow = 'latest';
+  $('sessionFollow').value = state.sessionFollow;
+  $('sessionFollow').addEventListener('change', event => {
+    state.sessionFollow = event.target.value;
+    state.pinned = null;
+    state.local = {available:false,reason:'Finding session…'};
+    saveSessionChoice();
+    renderChat();
+    refreshLocal();
+  });
   $('sessionProvider').value = state.sessionProvider;
   $('sessionProvider').addEventListener('change', event => {
     state.sessionProvider = event.target.value;

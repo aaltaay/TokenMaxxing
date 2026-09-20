@@ -1,7 +1,7 @@
 {
   "name": "tokenmaxxing",
   "productName": "TOKENMAXXING",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "One place to read AI usage across Cursor, Claude and Codex.",
   "license": "MIT",
   "main": "main.js",
@@ -15,16 +15,53 @@
     "electron": "^32.0.0",
     "electron-builder": "26.15.3"
   },
-  "dependencies": { "electron-updater": "6.8.9" },
-  "repository": { "type": "git", "url": "https://github.com/aaltaay/TokenMaxxing.git" },
+  "dependencies": {
+    "electron-updater": "6.8.9"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aaltaay/TokenMaxxing.git"
+  },
   "build": {
     "appId": "com.tokenmaxxing.desktop",
     "productName": "TOKENMAXXING",
-    "directories": { "output": "../dist" },
-    "files": ["*.js", "renderer/**/*", "package.json", "!test-*"],
-    "extraResources": [{ "from": "../build/engine/tokenmaxxing-engine", "to": "engine" }],
-    "win": { "target": ["nsis"], "artifactName": "TokenMaxxing-Setup-${version}-${arch}.${ext}" },
-    "nsis": { "oneClick": true, "perMachine": false, "deleteAppDataOnUninstall": false },
-    "publish": [{ "provider": "github", "owner": "aaltaay", "repo": "TokenMaxxing", "releaseType": "release" }]
+    "directories": {
+      "output": "../dist"
+    },
+    "files": [
+      "*.js",
+      "renderer/**/*",
+      "package.json",
+      "!test-*"
+    ],
+    "extraResources": [
+      {
+        "from": "../build/engine/tokenmaxxing-engine",
+        "to": "engine"
+      },
+      {
+        "from": "active-chat.ps1",
+        "to": "active-chat.ps1"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "TokenMaxxing-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "deleteAppDataOnUninstall": false
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "aaltaay",
+        "repo": "TokenMaxxing",
+        "releaseType": "release"
+      }
+    ]
   }
 }

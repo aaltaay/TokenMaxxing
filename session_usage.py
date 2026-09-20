@@ -85,7 +85,16 @@ def parse_session(provider, path, modified):
     return result
 
 
-def file_sessions(provider):
+def codex_titles():
+    path = Path(os.environ.get('CODEX_HOME', Path.home()/'.codex'))/'session_index.jsonl'
+    try:
+        return {row['id']: row['thread_name'] for row in read_records(path)
+                if isinstance(row.get('id'), str) and isinstance(row.get('thread_name'), str)}
+    except (OSError, ValueError):
+        return {}
+
+
+def file_sessions(provider, selected_id=None):
     root = (Path(os.environ.get('CODEX_HOME', Path.home()/'.codex'))/'sessions' if provider == 'codex'
             else Path(os.environ.get('CLAUDE_CONFIG_DIR', Path.home()/'.claude'))/'projects')
     entries = []
@@ -94,7 +103,11 @@ def file_sessions(provider):
         try: entries.append((path.stat().st_mtime, path))
         except OSError: continue
     sessions = []
-    for modified,path in sorted(entries, key=lambda item:item[0], reverse=True)[:100]:
+    ordered = sorted(entries, key=lambda item:item[0], reverse=True)
+    chosen = ordered[:100]
+    if selected_id:
+        chosen += [entry for entry in ordered[100:] if entry[1].stem.endswith(selected_id)]
+    for modified,path in chosen:
         try:
             session = parse_session(provider,path,modified)
             if session: sessions.append(session)
@@ -124,15 +137,29 @@ def cursor_sessions():
     finally: con.close()
 
 
-def get_sessions(provider='codex', pinned=None):
+def get_sessions(provider='codex', pinned=None, follow='latest', active_title=None):
     if provider not in ('codex','claude','cursor'): raise ValueError('Unknown session provider')
+    if follow not in ('latest', 'active'): raise ValueError('Unknown follow mode')
+    titles = codex_titles() if provider == 'codex' else {}
+    active = provider == 'codex' and follow == 'active' and not pinned
+    matches = [ident for ident, title in titles.items() if title == active_title] if active_title else []
+    target = pinned or (matches[0] if active and len(matches) == 1 else None)
+    key = (provider, target)
     with _lock:
-        cached = _cache.get(provider)
+        cached = _cache.get(key)
         if not cached or time.monotonic()-cached[0]>=5:
-            sessions = cursor_sessions() if provider == 'cursor' else file_sessions(provider)
-            _cache[provider] = (time.monotonic(),sessions)
+            sessions = cursor_sessions() if provider == 'cursor' else file_sessions(provider, target)
+            if len(_cache) >= 10: _cache.clear()
+            _cache[key] = (time.monotonic(),sessions)
         else: sessions=cached[1]
-    selected = next((s for s in sessions if s['id']==pinned),None) if pinned else next(iter(sessions),None)
+    sessions = [{**s, 'name': f"{titles[s['id']]} · {s['id'][:8]}" if s['id'] in titles else s['name']} for s in sessions]
+    selected = next((s for s in sessions if s['id']==target),None) if target else (None if active else next(iter(sessions),None))
+    reason = 'Pinned session is unavailable. Choose another session.' if pinned else 'No local session records found for this provider.'
+    if active and not selected:
+        reason = ('More than one local chat has this title. Select the chat manually.' if len(matches) > 1 else
+                  'Open chat has no matching local session record. Select a chat manually.' if active_title else
+                  'Open chat could not be detected. Open Codex, select a chat, or choose a session manually.')
     return {'available':True, 'provider':provider, 'pinned':pinned,
+            'selection_mode': 'pinned' if pinned else 'active' if active else 'latest',
             'chats':[{'id':s['id'],'name':s['name']} for s in sessions], 'chat':dict(selected) if selected else None,
-            'reason': 'Pinned session is no longer in the recent local records. Choose Latest activity.' if pinned and not selected else 'No local session records found for this provider.'}
+            'reason':reason}

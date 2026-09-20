@@ -40,6 +40,34 @@ class SessionsTest(unittest.TestCase):
             self.assertEqual(s.get_sessions('codex','old')['chat']['id'],'old')
             self.assertEqual(s.get_sessions('codex')['chat']['id'],'new')
             self.assertIsNone(s.get_sessions('codex','missing')['chat'])
+    def test_open_chat_switches_without_any_log_writes(self):
+        rows=[{'id':'background','name':'Background','used':999},
+              {'id':'one','name':'One','used':100},{'id':'two','name':'Two','used':200}]
+        with patch.object(s,'file_sessions',return_value=rows), patch.object(s,'codex_titles',return_value={'one':'First chat','two':'Second chat'}):
+            first=s.get_sessions('codex',follow='active',active_title='First chat')
+            second=s.get_sessions('codex',follow='active',active_title='Second chat')
+            self.assertEqual(first['chat']['used'],100)
+            self.assertEqual(second['chat']['used'],200)
+            self.assertEqual(second['selection_mode'],'active')
+            self.assertIn('Second chat',second['chat']['name'])
+            self.assertEqual(s.get_sessions('codex',follow='latest')['chat']['used'],999)
+    def test_unavailable_or_ambiguous_open_chat_never_shows_background_usage(self):
+        rows=[{'id':'one','name':'One','used':999}]
+        with patch.object(s,'file_sessions',return_value=rows), patch.object(s,'codex_titles',return_value={'one':'Duplicate','two':'Duplicate'}):
+            for title in [None,'Unknown','Duplicate']:
+                self.assertIsNone(s.get_sessions('codex',follow='active',active_title=title)['chat'])
+            self.assertEqual(s.get_sessions('codex','one',follow='active',active_title='Unknown')['chat']['used'],999)
+    def test_selected_old_session_is_included_beyond_recent_100(self):
+        root=Path(self.tmp.name)/'sessions';root.mkdir()
+        for i in range(102):
+            p=root/f'rollout-{i:03}.jsonl'
+            p.write_text(json.dumps({'type':'session_meta','payload':{'id':f'{i:03}'}}))
+            import os
+            os.utime(p,(i+1,i+1))
+        with patch.dict(s.os.environ,{'CODEX_HOME':self.tmp.name}):
+            sessions=s.file_sessions('codex','000')
+        self.assertEqual(len(sessions),101)
+        self.assertIn('000',[row['id'] for row in sessions])
     def test_cursor_skips_missing_stale_selection_and_uses_valid_records(self):
         db=Path(self.tmp.name)/'cursor.db'
         con=sqlite3.connect(db)
