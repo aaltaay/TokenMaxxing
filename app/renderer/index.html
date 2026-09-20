@@ -145,6 +145,10 @@
 
   </main>
 
+  <div class="update-strip" aria-label="Application updates">
+    <span id="updateStatus" role="status" aria-live="polite">Checking app version…</span>
+    <button class="chip" id="btnUpdate" type="button">Check for updates</button>
+  </div>
   <footer class="statusbar">
     <span class="dot" id="statusDot"></span>
     <span id="statusText">Starting…</span>
@@ -177,5 +181,6 @@
 </dialog>
 
 <script src="app.js"></script>
+<script src="updates.js"></script>
 </body>
 </html>

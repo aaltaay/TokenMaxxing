@@ -16,3 +16,6 @@ reset-buzzed.json
 
 # Electron
 app/node_modules/
+build/
+dist/
+*.spec

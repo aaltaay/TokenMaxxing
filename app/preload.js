@@ -6,6 +6,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('hud', {
   call: (cmd, args) => ipcRenderer.invoke('engine:call', cmd, args),
   engineStatus: () => ipcRenderer.invoke('engine:status'),
+  updateStatus: () => ipcRenderer.invoke('updates:status'),
+  checkUpdates: () => ipcRenderer.invoke('updates:check'),
+  installUpdate: () => ipcRenderer.invoke('updates:install'),
   previewResetAlert: () => ipcRenderer.invoke('reset:preview'),
   resetAlertStatus: () => ipcRenderer.invoke('reset:status'),
   dismissResetAlert: () => ipcRenderer.invoke('reset:dismiss'),
@@ -29,7 +32,7 @@ contextBridge.exposeInMainWorld('hud', {
 
   on: (event, handler) => {
     const channels = { ready: 'engine:ready', down: 'engine:down', fatal: 'engine:fatal', link: 'provider:link', connectionsChanged: 'providers:changed', resetAlert: 'reset:alert', smsStatus: 'sms:status' };
-    const channel = channels[event];
+    const channel = event === 'updateStatus' ? 'updates:status' : channels[event];
     if (!channel) throw new Error(`unknown event: ${event}`);
     const listener = (_e, payload) => handler(payload);
     ipcRenderer.on(channel, listener);

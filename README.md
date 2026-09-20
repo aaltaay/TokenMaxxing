@@ -41,6 +41,18 @@ The legacy `reset_schedule.py` utility and saved schedule settings remain for co
 
 ## Run locally
 
+### Windows installer and automatic updates
+
+Download the Windows x64 installer from [GitHub Releases](https://github.com/aaltaay/TokenMaxxing/releases/latest). It includes the Python engine; installed copies do not need Python, Node.js, or a Git checkout. Provider clients and their sign-ins are still required for their respective usage feeds.
+
+Installed copies check for stable releases on startup and every six hours, download a newer version, and offer **Restart to update** at the bottom of the window. Updates are installed only when you select that button. **Check for updates** also runs a check manually. Connection failures leave the running version usable. Source launches display the version but do not auto-update.
+
+To publish: bump `app/package.json` and its lockfile to a higher version, commit, and push a matching tag such as `v2.1.0`. The Windows release workflow runs tests, bundles the Python bridge, builds an NSIS installer, and publishes the installer, blockmap, and `latest.yml` together. Ordinary pushes to `main` do not release. A manual workflow run builds downloadable artifacts without publishing. The first installer must be installed manually before automatic updates are available.
+
+For a local build on Windows: install `scripts/requirements-build.txt` with Python 3.12, run `python scripts/build-engine.py`, then run `npm ci` and `npm run dist:win` from `app/`. Output is in `dist/`. No signing certificate is configured yet, so Windows may show an unknown-publisher warning. User settings and provider credentials are stored outside the installation and are preserved across updates.
+
+### Running from source
+
 Requirements:
 
 - Node.js 18 or newer for Electron.

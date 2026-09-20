@@ -1,0 +1,77 @@
+name: Windows release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scripts/requirements-build.txt
+      - name: Verify release version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $version = (Get-Content app/package.json | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag must match app/package.json version' }
+      - run: npm ci
+        working-directory: app
+      - run: python -m pip install -r scripts/requirements-build.txt
+      - run: python -m unittest discover
+      - run: npm test
+        working-directory: app
+      - run: python scripts/build-engine.py
+      - run: npm run dist:win
+        working-directory: app
+      - name: Verify packaged engine and update feed
+        shell: pwsh
+        run: |
+          & ./dist/win-unpacked/resources/engine/tokenmaxxing-engine.exe --once hello
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged engine smoke test failed' }
+          foreach ($file in @('dist/latest.yml', 'dist/win-unpacked/resources/app-update.yml')) {
+            if (!(Test-Path $file)) { throw "Missing update metadata: $file" }
+          }
+      - name: Exercise update download without installing
+        run: ./app/node_modules/.bin/electron.cmd scripts/smoke-updater.cjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: |
+            dist/*.exe
+            dist/*.blockmap
+            dist/latest.yml
+          if-no-files-found: error
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: release
+      - name: Publish completed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" release/* --verify-tag --draft --title "TOKENMAXXING $RELEASE_TAG" --generate-notes
+          gh release edit "$RELEASE_TAG" --draft=false --latest

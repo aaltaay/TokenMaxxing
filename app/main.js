@@ -7,6 +7,8 @@ const fs = require('node:fs');
 const { ProviderLinkManager } = require('./provider-link');
 const { ResetAttention } = require('./reset-attention');
 const { SmsAlerts } = require('./sms-alerts');
+const { Updates } = require('./updates');
+let updates = null;
 let sms = null;
 let smsQueue = Promise.resolve();
 function sendSms(body) {
@@ -117,8 +119,9 @@ class Bridge {
     this.pending = new Map();
     this.buffer = '';
     this.ready = false;
-    this.child = spawn(python.cmd, [...python.args, '-u', BRIDGE], {
-      cwd: REPO_ROOT,
+    this.child = spawn(python.cmd, python.bridgeArgs || [...python.args, '-u', BRIDGE], {
+      cwd: app.isPackaged ? process.resourcesPath : REPO_ROOT,
+      env: {...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8'},
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });
@@ -126,6 +129,7 @@ class Bridge {
     this.child.stdout.on('data', (chunk) => this.onData(chunk));
     this.child.stderr.setEncoding('utf8');
     this.child.stderr.on('data', (text) => process.stderr.write(`[engine] ${text}`));
+    this.child.on('error', error => fatal(`Usage engine could not start: ${error.message}`));
     this.child.on('exit', (code) => this.onExit(code));
   }
 
@@ -240,6 +244,12 @@ function createWindow() {
 }
 
 function startBridge() {
+  if (app.isPackaged) {
+    const engine = path.join(process.resourcesPath, 'engine', 'tokenmaxxing-engine.exe');
+    if (!fs.existsSync(engine)) { fatal('The bundled usage engine is missing. Reinstall TOKENMAXXING.'); return; }
+    bridge = new Bridge({cmd: engine, bridgeArgs: []});
+    return;
+  }
   if (!fs.existsSync(BRIDGE)) {
     fatal(`hud_bridge.py not found at ${BRIDGE}`);
     return;
@@ -263,6 +273,9 @@ ipcMain.handle('engine:call', async (_event, cmd, args) => {
 
 // The renderer asks for this on load; whoever wins the race, it still boots.
 ipcMain.handle('engine:status', () => engineState);
+ipcMain.handle('updates:status', () => updates?.state);
+ipcMain.handle('updates:check', () => { updates?.check(); return updates?.state; });
+ipcMain.handle('updates:install', () => updates?.install() || false);
 ipcMain.handle('reset:preview', previewAlert);
 ipcMain.handle('reset:status', () => attention.active);
 ipcMain.handle('reset:dismiss', () => attention.dismiss());
@@ -332,9 +345,15 @@ if (!app.requestSingleInstanceLock()) {
   nativeTheme.themeSource = 'dark';
 
   app.whenReady().then(() => {
+    const enabled = app.isPackaged && process.platform === 'win32';
+    updates = new Updates({
+      updater: enabled ? require('electron-updater').autoUpdater : null,
+      enabled, version: app.getVersion(), publish: state => send('updates:status', state),
+    });
     sms = new SmsAlerts({filename: path.join(app.getPath('userData'), 'twilio-credentials.enc'), storage: safeStorage});
     createWindow();
     startBridge();
+    updates.start();
     watchExistingConnections();
     alertPoll = setInterval(pollResetAlerts, 5000);
     app.on('activate', () => {
@@ -347,6 +366,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('before-quit', () => {
+    updates?.stop();
     clearInterval(alertPoll);
     attention.dismiss();
     providerLinks.dispose();
