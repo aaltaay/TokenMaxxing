@@ -165,6 +165,122 @@ function remainingTime(epoch) {
   return days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
+function duration(seconds) {
+  if (!known(seconds) || seconds < 0) return '—';
+  const s = Math.floor(seconds);
+  const days = Math.floor(s / 86400);
+  const hours = Math.floor((s % 86400) / 3600);
+  const minutes = Math.floor((s % 3600) / 60);
+  if (days) return `${days}d ${hours}h`;
+  if (hours) return `${hours}h ${minutes}m`;
+  return `${Math.max(1, minutes)}m`;
+}
+
+// ── pace ──────────────────────────────────────────────────────────────────
+// How spending compares with the even rate that would land at 100% exactly
+// when the provider resets the window. Used percent, reset time and window
+// length all come from the provider; the only thing computed here is the
+// straight line between them. It answers one question: at this rate, does
+// the quota run out before the reset, and what rate would last?
+
+// Below this share of a window (~7h of a week, 12min of a 5-hour window)
+// a low reading says nothing about pace yet.
+const PACE_MIN_ELAPSED = 0.04;
+// used ÷ even-pace used. 1.0 lands exactly on the reset.
+const PACE_AHEAD = 1.1;
+const PACE_FAST = 1.5;
+
+function pace({ used, elapsed, remaining }) {
+  if (!known(used) || !known(elapsed) || !known(remaining)) return null;
+  const total = elapsed + remaining;
+  if (total <= 0 || remaining < 0) return null;
+  const elapsedFrac = Math.min(1, Math.max(0, elapsed / total));
+  const expected = elapsedFrac * 100;
+  const left = Math.max(0, 100 - used);
+  const ratePerHour = elapsed > 0 ? used / (elapsed / 3600) : null;
+  const allowedPerHour = remaining > 0 ? left / (remaining / 3600) : 0;
+  const multiplier = expected > 0 && elapsed > 0 ? used / expected : null;
+  const runsOutIn = known(ratePerHour) && ratePerHour > 0 ? (left / ratePerHour) * 3600 : null;
+  const early = known(runsOutIn) ? remaining - runsOutIn : null;
+  let status;
+  if (used >= 100) status = 'exhausted';
+  else if (elapsedFrac < PACE_MIN_ELAPSED && used < 20) status = 'early';
+  else if (known(multiplier) && multiplier > PACE_FAST) status = 'fast';
+  else if (known(multiplier) && multiplier > PACE_AHEAD) status = 'ahead';
+  else if (left > 25 && elapsedFrac > 0.75 && used < expected - 25) status = 'spare';
+  else status = 'on-pace';
+  return { status, used, left, total, elapsed, remaining, elapsedFrac, expected,
+           ratePerHour, allowedPerHour, multiplier, runsOutIn, early };
+}
+
+const PACE_SEVERITY = { fast: 'now', ahead: 'soon', exhausted: 'now', spare: 'ok', 'on-pace': 'ok', early: 'off' };
+const PACE_BADGE = { fast: 'Too fast', ahead: 'Ahead of pace', exhausted: 'Limit reached', spare: 'Spare quota', 'on-pace': 'On pace', early: 'Just started' };
+
+/** A rate in % per hour, shown per day for windows of a day or more. */
+function rateText(perHour, total) {
+  if (!known(perHour)) return '—';
+  const perDay = total >= 86400;
+  const value = perDay ? perHour * 24 : perHour;
+  const digits = value >= 10 ? 0 : value >= 1 ? 1 : 2;
+  return `${value.toFixed(digits)}% / ${perDay ? 'day' : 'hour'}`;
+}
+
+function paceSentence(p) {
+  if (!p) return '';
+  const rate = rateText(p.allowedPerHour, p.total);
+  switch (p.status) {
+    case 'exhausted':
+      return `Limit reached. Nothing left until the reset in ${duration(p.remaining)}.`;
+    case 'early':
+      return `Window just started (${pct(p.used)} used); pace is not meaningful yet.`;
+    case 'fast':
+    case 'ahead':
+      return `${pct(p.used)} used with ${duration(p.remaining)} left, ${p.multiplier.toFixed(1)}× the even pace. ` +
+        `At this rate it runs out in ${duration(p.runsOutIn)}, ${duration(p.early)} before the reset. ` +
+        `Keep under ${rate} to last.`;
+    case 'spare':
+      return `${pct(p.left)} is still unused with ${duration(p.remaining)} left; ` +
+        `anything under ${rate} expires at the reset.`;
+    default:
+      return `${pct(p.used)} used against ${pct(p.expected)} even pace. ` +
+        `Room for ${rate} until the reset.`;
+  }
+}
+
+function windowPace(window, now = Date.now() / 1000) {
+  if (!known(window?.resets_at) || !known(window?.window_minutes) || !known(window?.used_percent)) return null;
+  const total = window.window_minutes * 60;
+  const remaining = window.resets_at - now;
+  if (remaining <= 0) return null;
+  return pace({ used: window.used_percent, elapsed: total - remaining, remaining });
+}
+
+function cursorPace(report, used, now = Date.now() / 1000) {
+  const start = report?.cycle_start ? Date.parse(report.cycle_start) / 1000 : null;
+  const end = report?.cycle_end ? Date.parse(report.cycle_end) / 1000 : null;
+  if (!known(start) || !known(end) || end <= start || end <= now || !known(used)) return null;
+  return pace({ used, elapsed: now - start, remaining: end - now });
+}
+
+/** Every window that is spending faster than its reset allows, worst first. */
+function paceAlerts() {
+  const alerts = [];
+  for (const [id, label] of [['claude', 'Claude'], ['codex', 'Codex']]) {
+    const provider = state.providers?.providers?.find(p => p.id === id);
+    if (!providerCurrent(provider)) continue;
+    for (const window of (provider.windows || []).filter(windowCurrent)) {
+      const p = windowPace(window);
+      if (p && (p.status === 'fast' || p.status === 'ahead')) alerts.push({ id, name: `${label} ${window.label.toLowerCase()}`, resets_at: window.resets_at, pace: p });
+    }
+  }
+  const cycle = state.cycle;
+  if (cycle && !state.cycleError) {
+    const p = cursorPace(cycle, cycle.total_pct);
+    if (p && (p.status === 'fast' || p.status === 'ahead')) alerts.push({ id: 'cursor', name: 'Cursor billing cycle', resets_at: Date.parse(cycle.cycle_end) / 1000, pace: p });
+  }
+  return alerts.sort((a, b) => (b.pace.multiplier || 0) - (a.pace.multiplier || 0));
+}
+
 // A reading is shown with its age for as long as the engine holds it, so a
 // refused or slow poll no longer blanks a provider and fills it back in.
 const HOLD_SECONDS = 900;
@@ -395,12 +511,27 @@ function renderAttention() {
   }
 
   const items = state.cycle?.attention || [];
+  const pacing = paceAlerts();
+  for (const alert of pacing) {
+    const p = alert.pace;
+    const node = el('div', { class: 'alert', vars: { '--c': SEVERITY[PACE_SEVERITY[p.status]] } }, [
+      iconWithClass(ICONS.alert, 'alert-icon'),
+      el('div', { class: 'alert-title', text: p.status === 'fast'
+        ? `${alert.name}: slow down, ${p.multiplier.toFixed(1)}× faster than the reset allows`
+        : `${alert.name}: ahead of pace, ${p.multiplier.toFixed(1)}× the even rate` }),
+      el('div', { class: 'alert-detail', text: `${paceSentence(p)} ${resetText(alert.resets_at)}.` }),
+      el('div', { class: 'alert-actions' }, [
+        el('button', { class: 'chip', type: 'button', text: 'See every window', onclick: () => selectView('resets') }),
+      ]),
+    ]);
+    host.append(node);
+  }
   if (!state.cycle) return;
 
-  if (!items.length) {
+  if (!items.length && !pacing.length) {
     host.append(el('div', { class: 'all-clear' }, [
       iconWithClass(ICONS.check, '', 17),
-      el('span', { text: 'No high usage reported in the available Cursor meters.' }),
+      el('span', { text: 'No high usage reported, and every window with a reset time is on pace.' }),
     ]));
     return;
   }
@@ -761,6 +892,60 @@ function handleLinkState(link) {
   renderLegend();
 }
 
+function paceRow(p) {
+  const severity = PACE_SEVERITY[p.status];
+  return el('div', { class: 'pace', vars: { '--c': SEVERITY[severity] } }, [
+    el('span', { class: 'badge', text: PACE_BADGE[p.status] }),
+    el('span', { class: 'pace-text', text: paceSentence(p) }),
+  ]);
+}
+
+function paceMeter(hue, used, p) {
+  const bar = el('div', { class: 'meter is-plain clock-meter', vars: { '--c': hue } }, [el('i', {})]);
+  bar.querySelector('i').style.width = `${Math.min(100, Math.max(0, used))}%`;
+  if (p && p.status !== 'exhausted') {
+    // Where the fill would be right now at an even pace: the bar is the
+    // reading, the tick is the reset's schedule.
+    const tick = el('b', { class: 'meter-tick', title: `${pct(p.expected)} would be even pace` });
+    tick.style.left = `${Math.min(100, Math.max(0, p.expected))}%`;
+    bar.append(tick);
+  }
+  return bar;
+}
+
+function renderCursorResets(host) {
+  const report = state.cycle;
+  if (!report) return;
+  const end = report.cycle_end ? Date.parse(report.cycle_end) / 1000 : null;
+  const card = el('div', { class: 'card' }, [
+    el('div', { class: 'card-head' }, [
+      el('h2', { text: 'Cursor' }),
+      el('span', { class: 'meta', text: `Dashboard · ${relativeTime(report.fetched_at)}${state.cycleError ? ' · refresh failed' : ''}` }),
+    ]),
+    el('div', { class: 'tile-note', text: 'Source: Cursor billing cycle. Pace assumes the reported cycle boundaries.' }),
+  ]);
+  const rows = [['Billing cycle · overall', report.total_pct], ['Other models', report.api_pct], ['Cursor models', report.auto_pct]];
+  let shown = 0;
+  for (const [label, used] of rows) {
+    if (!known(used)) continue;
+    shown++;
+    const p = cursorPace(report, used);
+    const clock = el('div', { class: 'clock' }, [
+      el('div', {}, [
+        el('div', { class: 'clock-name', text: label }),
+        el('div', { class: 'clock-when', text: resetText(end) }),
+      ]),
+      el('div', { class: 'clock-left', text: `${pct(used, 1)} used` }),
+      paceMeter(PROVIDER_HUE.cursor, used, p),
+    ]);
+    if (p) clock.append(paceRow(p));
+    if (known(end)) clock.append(el('div', { class: 'tile-note', text: `Until reported reset: ${remainingTime(end)}` }));
+    card.append(clock);
+  }
+  if (!shown) card.append(el('div', { class: 'connection-reason', text: 'Cursor returned no quota percentage for this cycle.' }));
+  host.append(card);
+}
+
 function renderResets() {
   const host = $('resetCards');
   host.replaceChildren();
@@ -789,9 +974,9 @@ function renderResets() {
           el('div',{class:'clock-left',text:windowCurrent(window) && known(window.used_percent) ? `${pct(window.used_percent,1)} used` : 'Awaiting update'}),
         ]);
         if (windowCurrent(window) && known(window.used_percent)) {
-          const bar = el('div',{class:'meter is-plain clock-meter',vars:{'--c':PROVIDER_HUE[id]}},[el('i',{})]);
-          bar.querySelector('i').style.width = `${Math.min(100,Math.max(0,window.used_percent))}%`;
-          clock.append(bar);
+          const p = windowPace(window);
+          clock.append(paceMeter(PROVIDER_HUE[id], window.used_percent, p));
+          if (p) clock.append(paceRow(p));
         }
         if (known(window.resets_at)) clock.append(el('div',{class:'tile-note',text:`Until reported reset: ${remainingTime(window.resets_at)}`}));
         card.append(clock);
@@ -800,6 +985,7 @@ function renderResets() {
     card.append(connectionControls(id,label,current));
     host.append(card);
   }
+  renderCursorResets(host);
 }
 
 // ── chrome ────────────────────────────────────────────────────────────────
@@ -881,6 +1067,7 @@ async function refreshCycle(force = false) {
     state.fetching = false;
     $('btnRefresh').classList.remove('is-spinning');
     paintOverview();
+    renderResets();
     renderChat();
   }
 }

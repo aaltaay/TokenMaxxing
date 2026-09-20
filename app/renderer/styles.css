@@ -374,7 +374,9 @@ body.is-mac .titlebar { --titlebar-inset: 84px; }
 
 /* ── meters (linear) ───────────────────────────────────────────────────── */
 
-.meter { height: 6px; border-radius: 99px; background: color-mix(in srgb, var(--c, var(--accent)) 18%, transparent); overflow: hidden; }
+.meter { position: relative; height: 6px; border-radius: 99px; background: color-mix(in srgb, var(--c, var(--accent)) 18%, transparent); overflow: hidden; }
+/* Even-pace marker: where the fill would sit if spending were spread evenly to the reset. */
+.meter-tick { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--ink); opacity: 0.85; border-radius: 1px; }
 .meter > i { display: block; height: 100%; border-radius: 99px; background: var(--c, var(--accent)); transition: width 0.5s var(--ease); }
 .meter.is-maxxed > i { box-shadow: 0 0 8px var(--c); }
 .meter.is-plain { background: var(--track); }
@@ -424,6 +426,9 @@ body.is-mac .titlebar { --titlebar-inset: 84px; }
   color: var(--c, var(--ink));
 }
 .clock-meter { grid-column: 1 / -1; margin-top: 5px; }
+.pace { grid-column: 1 / -1; display: flex; align-items: flex-start; gap: 8px; margin-top: 6px; }
+.pace .badge { flex: none; margin-top: 1px; }
+.pace-text { font-size: 11px; line-height: 1.5; color: var(--ink-2); }
 
 .badge {
   display: inline-flex; align-items: center; gap: 4px;
