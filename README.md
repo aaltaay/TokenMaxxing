@@ -1,9 +1,10 @@
 # Cursor Token HUD
 
-Always-on-top window that answers two questions the Cursor UI splits apart:
+Always-on-top window that answers three questions the Cursor UI splits apart:
 
 1. **This cycle -- where did the 75% go?** Other Models vs Cursor Models, dollars by chat, cloud vs local, burn rate.
 2. **This chat -- how fat is the context window right now?** Same snapshot Cursor already writes to `state.vscdb`.
+3. **Resets -- when do Claude / Codex provider windows refresh?** 5-hour session and weekly countdowns, plus a Windows desktop buzz. Not the Cursor billing-cycle %.
 
 This is not an official Cursor product. Billing numbers come from the same unofficial `cursor.com` dashboard session the app already has (`cursorAuth/accessToken`). That JWT is never written to disk by this tool.
 
@@ -40,10 +41,79 @@ Billed **output** is not a local field. It is on the cycle tab, from the dashboa
 
 Cache tokens are not stored in `promptTokenBreakdown`. Cycle-tab cache-read totals come from the dashboard.
 
+### Resets tab
+
+These clocks are **provider session / weekly windows** (Claude and Codex/ChatGPT). They are **not** Cursor Other Models %, Cursor Models %, Grok Bot weekly, or the billing cycle. v1 does not scrape Anthropic or OpenAI.
+
+| You see | What it is |
+|---|---|
+| Session countdown | Next 5-hour session boundary for that provider |
+| Weekly countdown | Next weekday+time in `America/New_York` |
+| next ... ET | Fire time shown in Eastern Time |
+| rolling midnight ET | No `session_anchor` yet -- guess aligned to midnight ET. Mark session to sync. |
+| PLACEHOLDER | Shipped weekly time. Paste the real one from Settings -> Usage. |
+| last buzz | Last desktop reset buzz recorded for that clock |
+| Mark ... session now | Sets `session_anchor` to now (next reset = now + 5h) |
+| Test buzz | Plays the Windows `winsound` buzzer (or Tk bell elsewhere) and flashes a banner |
+
+**Buzz rules**
+
+- Windows: two-tone `winsound.Beep` plus a short topmost banner / window flash inside this HUD.
+- Optional pre-warn (default **on**, **2 minutes** before). Config: `prewarn_enabled`, `prewarn_minutes`.
+- The same reset id is persisted in `~/.cursor/token-hud/reset-buzzed.json` so one fire does not spam.
+- Session clocks **do not buzz** until you mark a session start (otherwise the rolling guess would beep at 00:00 / 05:00 / 10:00 ET).
+- Weekly clocks **do not buzz** while `weekly_placeholder` is true. After you paste the real weekday+time, set `"weekly_placeholder": false`.
+
+**Config** (created with defaults if missing): `~/.cursor/token-hud/reset-schedule.json`
+
+On Windows that is `C:\Users\<you>\.cursor\token-hud\reset-schedule.json`. Editing the JSON is enough; the HUD reloads on save.
+
+Default shape (weekly times are placeholders):
+
+```json
+{
+  "timezone": "America/New_York",
+  "prewarn_minutes": 2,
+  "prewarn_enabled": true,
+  "buzz_enabled": true,
+  "providers": {
+    "claude": {
+      "session_hours": 5,
+      "session_anchor": null,
+      "weekly_weekday": "thursday",
+      "weekly_time": "09:00",
+      "weekly_placeholder": true
+    },
+    "codex": {
+      "session_hours": 5,
+      "session_anchor": null,
+      "weekly_weekday": "thursday",
+      "weekly_time": "09:00",
+      "weekly_placeholder": true
+    }
+  }
+}
+```
+
+**Schedule math**
+
+- Session with an anchor: windows are `anchor + n * session_hours`. Next fire is the next boundary after now.
+- Session without an anchor: rolling 5-hour slots from midnight America/New_York. Countdown only; no buzz until you re-anchor.
+- Weekly: next occurrence of `weekly_weekday` at `weekly_time` Eastern, then every 7 days.
+- The HUD checks these clocks on the existing `root.after` loop (about once a second). It never blocks the UI thread for network.
+
+CLI (no window):
+
+```bash
+python reset_schedule.py
+python reset_schedule.py --mark-session claude
+python token_hud.py --test-buzz
+```
+
 ## Requirements
 
-- Python 3.10+ (stdlib only: `tkinter`, `sqlite3`, `urllib`)
-- Cursor desktop, signed in, with at least one agent chat so `state.vscdb` exists
+- Python 3.10+ (stdlib only: `tkinter`, `sqlite3`, `urllib`; `winsound` on Windows; `zoneinfo` with a built-in Eastern fallback)
+- Cursor desktop, signed in, with at least one agent chat so `state.vscdb` exists (cycle + chat tabs). The Resets tab works without that.
 
 ## Run it
 
@@ -54,6 +124,7 @@ python token_hud.py
 On Windows, `start.bat` launches it without a console (`pythonw` if available). Closing the window is fine. Starting it again only allows one copy.
 
 `python cursor_usage.py` prints a text cycle summary (add `--refresh` to bypass the 3-minute cache).
+`python reset_schedule.py` prints Claude / Codex reset countdowns.
 
 The HUD follows `cursor/glass.selectedAgent`. If the tab switch lags, click a chat in the list, or hit **Follow Cursor tab**.
 
@@ -65,11 +136,15 @@ Cycle usage refreshes about every 3 minutes, or when you click **Refresh usage**
 - macOS: `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`
 - Linux: `~/.config/Cursor/User/globalStorage/state.vscdb`
 
-Cache file (no secrets): `~/.cursor/token-hud/cycle-cache.json`
+Cache / config (no secrets):
+
+- `~/.cursor/token-hud/cycle-cache.json` -- last Cursor dashboard snapshot
+- `~/.cursor/token-hud/reset-schedule.json` -- Claude / Codex reset clocks
+- `~/.cursor/token-hud/reset-buzzed.json` -- last-fired reset event ids (dedupe)
 
 ### Open with Cursor (optional)
 
-1. Copy `token_hud.py`, `cursor_usage.py`, `start.bat`, and `start.vbs` to `~/.cursor/token-hud/`
+1. Copy `token_hud.py`, `cursor_usage.py`, `reset_schedule.py`, `start.bat`, and `start.vbs` to `~/.cursor/token-hud/`
 2. Copy `examples/start-token-hud.cmd` to `~/.cursor/hooks/start-token-hud.cmd`
 3. Merge `examples/hooks.json` into `~/.cursor/hooks.json`
 
