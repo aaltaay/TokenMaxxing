@@ -13,3 +13,6 @@ _usage_*.json
 cycle-cache.json
 reset-schedule.json
 reset-buzzed.json
+
+# Electron
+app/node_modules/

@@ -51,7 +51,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "These clocks are not Cursor Other Models / billing-cycle %."
     ),
     "timezone": "America/New_York",
-    "prewarn_minutes": 2,
+    "prewarn_minutes": 15,
     "prewarn_enabled": True,
     "buzz_enabled": True,
     "providers": {
@@ -94,11 +94,18 @@ class _Eastern(tzinfo):
         return timedelta(hours=1) if _wall_is_edt(dt.replace(tzinfo=None)) else timedelta(0)
 
     def fromutc(self, dt: datetime) -> datetime:
+        if dt.tzinfo is not self:
+            raise ValueError("fromutc requires this timezone")
         utc_naive = dt.replace(tzinfo=None)
-        est_wall = utc_naive + timedelta(hours=-5)
-        if _wall_is_edt(est_wall):
-            return (utc_naive + timedelta(hours=-4)).replace(tzinfo=self)
-        return (utc_naive + timedelta(hours=-5)).replace(tzinfo=self)
+        # The spring transition occurs at 02:00 EST (07:00 UTC), and
+        # the fall transition at 02:00 EDT (06:00 UTC). Comparing UTC
+        # boundaries avoids inventing 02:00 during the repeated fall hour.
+        year = utc_naive.year
+        start = datetime(year, 3, _nth_weekday(year, 3, 6, 2), 7)
+        end = datetime(year, 11, _nth_weekday(year, 11, 6, 1), 6)
+        offset = -4 if start <= utc_naive < end else -5
+        fold = int(end <= utc_naive < end + timedelta(hours=1))
+        return (utc_naive + timedelta(hours=offset)).replace(tzinfo=self, fold=fold)
 
 
 def _nth_weekday(year: int, month: int, weekday: int, n: int) -> int:
@@ -110,7 +117,13 @@ def _wall_is_edt(naive: datetime) -> bool:
     y = naive.year
     start = datetime(y, 3, _nth_weekday(y, 3, 6, 2), 2, 0, 0)
     end = datetime(y, 11, _nth_weekday(y, 11, 6, 1), 2, 0, 0)
-    return start <= naive < end
+    hour = timedelta(hours=1)
+    if start <= naive < start + hour:
+        # For the nonexistent spring hour, fold reverses the offset choice.
+        return bool(naive.fold)
+    if end - hour <= naive < end:
+        return not naive.fold
+    return start + hour <= naive < end - hour
 
 
 def et_tz() -> datetime.tzinfo:

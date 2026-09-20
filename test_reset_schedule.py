@@ -7,19 +7,26 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from unittest.mock import patch
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import reset_schedule as rs
 
 
-ET = ZoneInfo("America/New_York")
+ET = rs.et_tz()
+try:
+    REFERENCE_ET = ZoneInfo("America/New_York")
+except ZoneInfoNotFoundError:
+    REFERENCE_ET = None
 
 
 class HudDirTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        os.environ["TOKEN_HUD_DIR"] = self.tmp.name
+        environment = patch.dict(os.environ, {"TOKEN_HUD_DIR": self.tmp.name})
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def test_missing_config_writes_defaults(self) -> None:
         path = rs.config_path()
@@ -28,7 +35,7 @@ class HudDirTest(unittest.TestCase):
         self.assertTrue(path.exists())
         self.assertEqual(cfg["providers"]["claude"]["session_hours"], 5)
         self.assertTrue(cfg["providers"]["claude"]["weekly_placeholder"])
-        self.assertEqual(cfg["prewarn_minutes"], 2)
+        self.assertEqual(cfg["prewarn_minutes"], 15)
         self.assertTrue(cfg["prewarn_enabled"])
         disk = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(disk["timezone"], "America/New_York")
@@ -108,6 +115,7 @@ class MathTest(unittest.TestCase):
         self.assertEqual(rs.fmt_countdown(5 * 3600 + 12 * 60), "5h 12m")
         self.assertEqual(rs.fmt_countdown(4 * 86400 + 2 * 3600), "4d 2h")
 
+    @unittest.skipIf(REFERENCE_ET is None, "System timezone database is unavailable")
     def test_eastern_fallback_matches_zoneinfo(self) -> None:
         eastern = rs._Eastern()
         samples = [
@@ -120,18 +128,50 @@ class MathTest(unittest.TestCase):
         ]
         for raw in samples:
             utc = datetime.fromisoformat(raw)
-            self.assertEqual(
-                utc.astimezone(ET).utcoffset(),
-                utc.astimezone(eastern).utcoffset(),
-                raw,
-            )
+            reference = utc.astimezone(REFERENCE_ET)
+            fallback = utc.astimezone(eastern)
+            self.assertEqual(reference.isoformat(), fallback.isoformat(), raw)
+            self.assertEqual(reference.fold, fallback.fold, raw)
+
+    def test_eastern_fallback_utc_boundaries_without_tzdata(self) -> None:
+        eastern = rs._Eastern()
+        samples = [
+            ("2026-01-15T17:00:00+00:00", "2026-01-15T12:00:00-05:00", 0),
+            ("2026-03-08T06:59:00+00:00", "2026-03-08T01:59:00-05:00", 0),
+            ("2026-03-08T07:00:00+00:00", "2026-03-08T03:00:00-04:00", 0),
+            ("2026-07-04T16:00:00+00:00", "2026-07-04T12:00:00-04:00", 0),
+            ("2026-11-01T05:59:00+00:00", "2026-11-01T01:59:00-04:00", 0),
+            ("2026-11-01T06:00:00+00:00", "2026-11-01T01:00:00-05:00", 1),
+            ("2026-11-01T06:59:00+00:00", "2026-11-01T01:59:00-05:00", 1),
+            ("2026-11-01T07:00:00+00:00", "2026-11-01T02:00:00-05:00", 0),
+        ]
+        for raw, expected, fold in samples:
+            with self.subTest(utc=raw):
+                utc = datetime.fromisoformat(raw)
+                local = utc.astimezone(eastern)
+                self.assertEqual(local.isoformat(), expected)
+                self.assertEqual(local.fold, fold)
+                self.assertEqual(local.timestamp(), utc.timestamp())
+
+    def test_eastern_fallback_fold_offsets(self) -> None:
+        eastern = rs._Eastern()
+        for month, day, hour, offsets in ((3, 8, 2, (-5, -4)), (11, 1, 1, (-4, -5))):
+            for fold, offset in enumerate(offsets):
+                local = datetime(2026, month, day, hour, 30, tzinfo=eastern, fold=fold)
+                self.assertEqual(local.utcoffset(), timedelta(hours=offset))
+
+    def test_et_tz_works_when_zoneinfo_data_is_missing(self) -> None:
+        with patch("zoneinfo.ZoneInfo", side_effect=ZoneInfoNotFoundError):
+            self.assertIsInstance(rs.et_tz(), rs._Eastern)
 
 
 class BuzzGateTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        os.environ["TOKEN_HUD_DIR"] = self.tmp.name
+        environment = patch.dict(os.environ, {"TOKEN_HUD_DIR": self.tmp.name})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.cfg = rs.load_config()
         self.cfg["providers"]["claude"]["weekly_placeholder"] = False
         self.cfg["providers"]["codex"]["weekly_placeholder"] = False
@@ -204,7 +244,9 @@ class CliTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        os.environ["TOKEN_HUD_DIR"] = self.tmp.name
+        environment = patch.dict(os.environ, {"TOKEN_HUD_DIR": self.tmp.name})
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def test_status_mentions_placeholder_and_path(self) -> None:
         text = rs.render_status(datetime(2026, 9, 20, 12, 0, tzinfo=ET))
@@ -213,7 +255,9 @@ class CliTest(unittest.TestCase):
         self.assertIn(str(rs.config_path()), text)
 
     def test_test_buzz_cli(self) -> None:
-        code = rs.main(["--test-buzz"])
+        with patch.object(rs, "play_buzz", return_value="mock") as buzz:
+            code = rs.main(["--test-buzz"])
+        buzz.assert_called_once_with()
         self.assertEqual(code, 0)
 
     def test_unknown_provider(self) -> None:
