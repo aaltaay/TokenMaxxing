@@ -1,9 +1,10 @@
 # Cursor Token HUD
 
-Always-on-top window that answers two questions the Cursor UI splits apart:
+Always-on-top window that answers three questions the Cursor UI splits apart:
 
 1. **This cycle -- where did the 75% go?** Other Models vs Cursor Models, dollars by chat, cloud vs local, burn rate.
 2. **This chat -- how fat is the context window right now?** Same snapshot Cursor already writes to `state.vscdb`.
+3. **Resets -- when do Claude and Codex/ChatGPT windows reopen?** Separate 5-hour and weekly clocks with a Windows desktop buzz. These are **not** the Cursor Other-Models cycle %.
 
 This is not an official Cursor product. Billing numbers come from the same unofficial `cursor.com` dashboard session the app already has (`cursorAuth/accessToken`). That JWT is never written to disk by this tool.
 
@@ -40,6 +41,31 @@ Billed **output** is not a local field. It is on the cycle tab, from the dashboa
 
 Cache tokens are not stored in `promptTokenBreakdown`. Cycle-tab cache-read totals come from the dashboard.
 
+### Resets tab
+
+| You see | What it is |
+|---|---|
+| Claude / Codex Session | Countdown to the next 5-hour provider window (starts after you click **Mark session now**, or after you set `session_anchor` in the JSON) |
+| Claude / Codex Weekly | Countdown to the next weekly reset (weekday + clock in `America/New_York`) |
+| Enabled checkbox | Per-meter mute. Saved back into the JSON |
+| Last buzzed | When this HUD last fired sound + banner for that meter |
+| Test buzz | Plays the Windows beep / system sound and flashes a banner now, so you do not wait hours |
+
+This tab does **not** read Anthropic or OpenAI live quotas. It is a local schedule. Cursor's Other-Models / Cursor-Models % stay on **This cycle**.
+
+Config (created with documented defaults if missing): `~/.cursor/token-hud/reset-schedule.json`
+
+Last-fired ids (dedupe so the same reset does not spam): `~/.cursor/token-hud/reset-buzz-state.json`
+
+Default schedule:
+
+- Session length: 5 hours, rolling from the last mark
+- Pre-warn: on, 2 minutes before (toggle in the HUD or set `pre_warn_enabled` / `pre_warn_minutes`)
+- Claude weekly placeholder: Thursday 00:00 ET
+- Codex/ChatGPT weekly placeholder: Thursday 11:00 ET
+
+Weekly exact times are account-specific. Paste the real weekday + time from **Settings -> Usage** into the JSON, then click **Reload config** (or wait a couple of seconds). `session_mode` can be `rolling` (next fire is `anchor + n * hours`) or `manual` (one fire per mark).
+
 ## Requirements
 
 - Python 3.10+ (stdlib only: `tkinter`, `sqlite3`, `urllib`)
@@ -53,7 +79,9 @@ python token_hud.py
 
 On Windows, `start.bat` launches it without a console (`pythonw` if available). Closing the window is fine. Starting it again only allows one copy.
 
-`python cursor_usage.py` prints a text cycle summary (add `--refresh` to bypass the 3-minute cache).
+`python token_hud.py --test-buzz` starts the HUD and fires one test banner + sound. `python token_hud.py --buzz-only` plays the sound and exits (no window). If the HUD is already running, `--test-buzz` plays the sound only.
+
+`python cursor_usage.py` prints a text cycle summary (add `--refresh` to bypass the 3-minute cache). `python reset_schedule.py` prints the current countdowns.
 
 The HUD follows `cursor/glass.selectedAgent`. If the tab switch lags, click a chat in the list, or hit **Follow Cursor tab**.
 
@@ -65,11 +93,11 @@ Cycle usage refreshes about every 3 minutes, or when you click **Refresh usage**
 - macOS: `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`
 - Linux: `~/.config/Cursor/User/globalStorage/state.vscdb`
 
-Cache file (no secrets): `~/.cursor/token-hud/cycle-cache.json`
+Cache / config (no secrets): `~/.cursor/token-hud/` (`cycle-cache.json`, `reset-schedule.json`, `reset-buzz-state.json`)
 
 ### Open with Cursor (optional)
 
-1. Copy `token_hud.py`, `cursor_usage.py`, `start.bat`, and `start.vbs` to `~/.cursor/token-hud/`
+1. Copy `token_hud.py`, `cursor_usage.py`, `reset_schedule.py`, `start.bat`, and `start.vbs` to `~/.cursor/token-hud/`
 2. Copy `examples/start-token-hud.cmd` to `~/.cursor/hooks/start-token-hud.cmd`
 3. Merge `examples/hooks.json` into `~/.cursor/hooks.json`
 

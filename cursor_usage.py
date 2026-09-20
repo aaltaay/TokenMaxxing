@@ -38,8 +38,12 @@ def cursor_state_db() -> Path:
     return home / ".config" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
 
 
+def hud_dir() -> Path:
+    return Path.home() / ".cursor" / "token-hud"
+
+
 def cache_path() -> Path:
-    return Path.home() / ".cursor" / "token-hud" / "cycle-cache.json"
+    return hud_dir() / "cycle-cache.json"
 
 
 def connect(db: Path | None = None) -> sqlite3.Connection:

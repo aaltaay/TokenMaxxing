@@ -2,6 +2,7 @@
 
 Tab 1: this billing cycle (the 75% question).
 Tab 2: the selected chat's context window, plus billed $ for that chat.
+Tab 3: Claude / Codex session + weekly reset buzzers (not Cursor cycle %).
 """
 from __future__ import annotations
 
@@ -25,9 +26,28 @@ from cursor_usage import (
     recent_chats,
     snapshot_for,
 )
+from reset_schedule import (
+    BuzzEvent,
+    config_path,
+    due_events,
+    ensure_config,
+    fmt_countdown,
+    fmt_et,
+    load_config,
+    load_state,
+    mark_session_now,
+    meter_views,
+    play_buzz,
+    record_fired,
+    set_meter_enabled,
+    set_pre_warn_enabled,
+    state_path,
+    test_event,
+)
 
 REFRESH_MS = 800
 BILLING_POLL_MS = 4000
+RESET_TICK_MS = 1000
 BG = "#1c1917"
 FG = "#cecdc3"
 DIM = "#878580"
@@ -95,20 +115,47 @@ class TokenHud:
         self.header_note = tk.Label(self.header, text="", bg=BG, fg=DIM, anchor="w", font=("Segoe UI", 8), wraplength=520, justify="left")
         self.header_note.pack(fill="x", pady=(2, 0))
 
-        nb_wrap = tk.Frame(self.root, bg=BG)
-        nb_wrap.pack(fill="both", expand=True, padx=8, pady=4)
-        self.nb = ttk.Notebook(nb_wrap)
+        self.buzz_banner = tk.Frame(self.root, bg=WARN)
+        self.buzz_banner_title = tk.Label(
+            self.buzz_banner, text="", bg=WARN, fg="#fff7ed", font=("Segoe UI", 10, "bold"), anchor="w"
+        )
+        self.buzz_banner_title.pack(fill="x", padx=12, pady=(6, 0))
+        self.buzz_banner_body = tk.Label(
+            self.buzz_banner,
+            text="",
+            bg=WARN,
+            fg="#fff7ed",
+            font=("Segoe UI", 9),
+            anchor="w",
+            wraplength=520,
+            justify="left",
+        )
+        self.buzz_banner_body.pack(fill="x", padx=12, pady=(0, 8))
+        self._banner_hide_job = None
+
+        self.nb_wrap = tk.Frame(self.root, bg=BG)
+        self.nb_wrap.pack(fill="both", expand=True, padx=8, pady=4)
+        self.nb = ttk.Notebook(self.nb_wrap)
         self.nb.pack(fill="both", expand=True)
 
         self.tab_cycle = tk.Frame(self.nb, bg=BG)
         self.tab_chat = tk.Frame(self.nb, bg=BG)
+        self.tab_resets = tk.Frame(self.nb, bg=BG)
         self.nb.add(self.tab_cycle, text="  This cycle  ")
         self.nb.add(self.tab_chat, text="  This chat  ")
+        self.nb.add(self.tab_resets, text="  Resets  ")
+
+        self.reset_cfg = ensure_config()
+        self.reset_state = load_state()
+        self._reset_cfg_mtime = None
+        self._last_config_load = 0.0
 
         self._build_cycle_tab()
         self._build_chat_tab()
+        self._build_resets_tab()
         self.refresh_local()
         self.root.after(200, self._billing_tick)
+        self.root.after(400, self._reset_tick)
 
     def _style(self) -> None:
         style = ttk.Style(self.root)
@@ -250,6 +297,105 @@ class TokenHud:
             wraplength=520,
             justify="left",
         ).pack(anchor="w", pady=8)
+
+    def _build_resets_tab(self) -> None:
+        note = (
+            "Claude and Codex/ChatGPT session + weekly clocks -- not the Cursor Other-Models %. "
+            "Weekly weekday/time below are placeholders. Paste the real values from "
+            f"Settings -> Usage into {config_path()}."
+        )
+        tk.Label(
+            self.tab_resets,
+            text=note,
+            bg=BG,
+            fg=DIM,
+            anchor="w",
+            justify="left",
+            wraplength=520,
+            font=("Segoe UI", 8),
+        ).pack(fill="x", padx=12, pady=(8, 4))
+
+        btns = tk.Frame(self.tab_resets, bg=BG)
+        btns.pack(fill="x", padx=12, pady=(0, 6))
+        tk.Button(btns, text="Test buzz", command=self.test_buzz, bg="#44403c", fg=FG, relief="flat").pack(side="left")
+        tk.Button(
+            btns, text="Reload config", command=self.reload_reset_config, bg="#44403c", fg=FG, relief="flat"
+        ).pack(side="left", padx=6)
+        pre_m = int(float(self.reset_cfg.get("pre_warn_minutes") or 2))
+        self.prewarn_var = tk.BooleanVar(value=bool(self.reset_cfg.get("pre_warn_enabled", True)))
+        tk.Checkbutton(
+            btns,
+            text=f"Pre-warn {pre_m} min",
+            variable=self.prewarn_var,
+            command=self._on_prewarn_toggle,
+            bg=BG,
+            fg=FG,
+            selectcolor=CARD,
+            activebackground=BG,
+            activeforeground=FG,
+            highlightthickness=0,
+        ).pack(side="left", padx=8)
+        self.reset_status = tk.Label(btns, text="", bg=BG, fg=DIM, anchor="w")
+        self.reset_status.pack(side="left", padx=6)
+
+        self.reset_rows: dict[tuple[str, str], dict] = {}
+        for provider, title in (("claude", "Claude"), ("codex", "Codex/ChatGPT")):
+            card = tk.Frame(self.tab_resets, bg=CARD)
+            card.pack(fill="x", padx=10, pady=6)
+            tk.Label(card, text=title, bg=CARD, fg=ACCENT, font=("Segoe UI", 10, "bold"), anchor="w").pack(
+                fill="x", padx=10, pady=(8, 2)
+            )
+            for kind, kind_label in (("session", "Session"), ("weekly", "Weekly")):
+                row = tk.Frame(card, bg=CARD)
+                row.pack(fill="x", padx=8, pady=3)
+                var = tk.BooleanVar(value=True)
+                tk.Checkbutton(
+                    row,
+                    text=kind_label,
+                    variable=var,
+                    command=lambda p=provider, k=kind, v=var: self._on_meter_toggle(p, k, v),
+                    bg=CARD,
+                    fg=FG,
+                    selectcolor=BG,
+                    activebackground=CARD,
+                    activeforeground=FG,
+                    highlightthickness=0,
+                    width=8,
+                    anchor="w",
+                ).pack(side="left")
+                countdown = tk.Label(row, text="--", bg=CARD, fg=FG, font=("Cascadia Mono", 10), width=14, anchor="w")
+                countdown.pack(side="left")
+                nxt = tk.Label(row, text="", bg=CARD, fg=DIM, font=("Segoe UI", 8), anchor="w")
+                nxt.pack(side="left", fill="x", expand=True)
+                if kind == "session":
+                    tk.Button(
+                        row,
+                        text="Mark session now",
+                        command=lambda p=provider: self._mark_session(p),
+                        bg="#44403c",
+                        fg=FG,
+                        relief="flat",
+                        font=("Segoe UI", 8),
+                    ).pack(side="right")
+                extra = tk.Label(
+                    card, text="", bg=CARD, fg=DIM, font=("Segoe UI", 8), anchor="w", wraplength=500, justify="left"
+                )
+                extra.pack(fill="x", padx=18, pady=(0, 2))
+                self.reset_rows[(provider, kind)] = {"enabled": var, "countdown": countdown, "next": nxt, "extra": extra}
+            last = tk.Label(card, text="Last buzzed: never", bg=CARD, fg=DIM, font=("Segoe UI", 8), anchor="w")
+            last.pack(fill="x", padx=10, pady=(2, 8))
+            self.reset_rows[(provider, "last")] = {"last": last}
+
+        tk.Label(
+            self.tab_resets,
+            text=f"Config: {config_path()}\nLast-fired ids: {state_path()}",
+            bg=BG,
+            fg=DIM,
+            anchor="w",
+            justify="left",
+            font=("Segoe UI", 8),
+        ).pack(fill="x", padx=12, pady=8)
+        self._paint_resets()
 
     def _tree(self, parent, columns, widths, height: int) -> ttk.Treeview:
         tree = ttk.Treeview(parent, columns=columns, show="headings", height=height, style="Dark.Treeview")
@@ -460,15 +606,146 @@ class TokenHud:
         for label in labels:
             self.listbox.insert("end", label)
 
+    def reload_reset_config(self) -> None:
+        self.reset_cfg = load_config()
+        self.reset_state = load_state()
+        self.prewarn_var.set(bool(self.reset_cfg.get("pre_warn_enabled", True)))
+        path = config_path()
+        self._reset_cfg_mtime = path.stat().st_mtime if path.exists() else None
+        self._last_config_load = time.time()
+        self.reset_status.configure(text="Reloaded reset-schedule.json", fg=ACCENT)
+        self._paint_resets()
+
+    def _on_prewarn_toggle(self) -> None:
+        self.reset_cfg = set_pre_warn_enabled(self.reset_cfg, bool(self.prewarn_var.get()))
+
+    def _on_meter_toggle(self, provider: str, kind: str, var: tk.BooleanVar) -> None:
+        self.reset_cfg = set_meter_enabled(self.reset_cfg, provider, kind, bool(var.get()))
+
+    def _mark_session(self, provider: str) -> None:
+        self.reset_cfg = mark_session_now(self.reset_cfg, provider)
+        self.reset_status.configure(text=f"Marked {provider} session start", fg=ACCENT)
+        self._paint_resets()
+
+    def _paint_resets(self) -> None:
+        views = meter_views(self.reset_cfg, self.reset_state)
+        last_by: dict[str, list[str]] = {}
+        for view in views:
+            widgets = self.reset_rows.get((view.provider, view.kind))
+            if not widgets:
+                continue
+            widgets["enabled"].set(view.enabled)
+            if view.needs_anchor:
+                widgets["countdown"].configure(text="mark session", fg=DIM)
+                widgets["next"].configure(text="no 5h clock until you mark")
+            elif not view.enabled:
+                widgets["countdown"].configure(text="off", fg=DIM)
+                widgets["next"].configure(text=f"next {fmt_et(view.next_at)}" if view.next_at else "--")
+            else:
+                color = WARN if view.remaining_s is not None and view.remaining_s <= 120 else FG
+                widgets["countdown"].configure(text=fmt_countdown(view.remaining_s), fg=color)
+                widgets["next"].configure(text=f"next {fmt_et(view.next_at)}")
+            extra = view.note
+            if view.kind == "session":
+                extra = f"{view.note}. Click Mark session now when a window starts."
+            widgets["extra"].configure(text=extra)
+            if view.last_buzz:
+                last_by.setdefault(view.provider, []).append(
+                    f"{view.kind} {view.last_phase or ''} · {view.last_buzz}".replace("  ", " ").strip()
+                )
+        for provider in ("claude", "codex"):
+            last_w = self.reset_rows.get((provider, "last"))
+            if not last_w:
+                continue
+            bits = last_by.get(provider) or []
+            last_w["last"].configure(text="Last buzzed: " + ("; ".join(bits) if bits else "never"))
+
+    def _reset_tick(self) -> None:
+        try:
+            path = config_path()
+            mtime = path.stat().st_mtime if path.exists() else None
+            now = time.time()
+            if mtime and mtime != self._reset_cfg_mtime and now - self._last_config_load > 2:
+                self.reset_cfg = load_config()
+                self._reset_cfg_mtime = mtime
+                self._last_config_load = now
+                self.prewarn_var.set(bool(self.reset_cfg.get("pre_warn_enabled", True)))
+            for ev in due_events(self.reset_cfg, self.reset_state):
+                self._fire_reset_buzz(ev)
+            self._paint_resets()
+        except Exception as exc:
+            self.reset_status.configure(text=f"Reset tick: {exc}"[:90], fg=WARN)
+        self.root.after(RESET_TICK_MS, self._reset_tick)
+
+    def test_buzz(self) -> None:
+        self._fire_reset_buzz(test_event("fire"), persist=False)
+
+    def _fire_reset_buzz(self, ev: BuzzEvent, persist: bool = True) -> None:
+        play_buzz(ev.phase)
+        if persist and ev.provider != "test":
+            self.reset_state = record_fired(self.reset_state, ev)
+        self._show_banner(ev.title, ev.body)
+        self._show_toast(ev.title, ev.body)
+        self._flash_hud()
+        self.reset_status.configure(text=f"Buzz: {ev.title}", fg=WARN)
+
+    def _show_banner(self, title: str, body: str) -> None:
+        self.buzz_banner_title.configure(text=title)
+        self.buzz_banner_body.configure(text=body)
+        if not self.buzz_banner.winfo_ismapped():
+            self.buzz_banner.pack(fill="x", before=self.nb_wrap)
+        if self._banner_hide_job is not None:
+            self.root.after_cancel(self._banner_hide_job)
+        self._banner_hide_job = self.root.after(8000, self._hide_banner)
+
+    def _hide_banner(self) -> None:
+        self.buzz_banner.pack_forget()
+        self._banner_hide_job = None
+
+    def _flash_hud(self) -> None:
+        for i, color in enumerate((WARN, BG, WARN, BG)):
+            self.root.after(i * 180, lambda c=color: self.root.configure(bg=c))
+
+    def _show_toast(self, title: str, body: str) -> None:
+        win = tk.Toplevel(self.root)
+        try:
+            win.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        try:
+            win.overrideredirect(True)
+        except tk.TclError:
+            pass
+        win.configure(bg=WARN)
+        tk.Label(win, text=title, bg=WARN, fg="#fff7ed", font=("Segoe UI", 11, "bold")).pack(padx=16, pady=(10, 2))
+        tk.Label(win, text=body, bg=WARN, fg="#fff7ed", font=("Segoe UI", 9), wraplength=340, justify="left").pack(
+            padx=16, pady=(0, 12)
+        )
+        self.root.update_idletasks()
+        win.geometry(f"+{self.root.winfo_rootx() + 16}+{self.root.winfo_rooty() + 16}")
+        win.after(7000, win.destroy)
+
     def run(self) -> None:
         self.root.mainloop()
 
 
 if __name__ == "__main__":
+    test_buzz = "--test-buzz" in sys.argv
+    buzz_only = "--buzz-only" in sys.argv
+    if buzz_only:
+        play_buzz("fire")
+        time.sleep(0.9)
+        sys.exit(0)
     if not claim_single_instance():
+        if test_buzz:
+            play_buzz("fire")
+            sys.stderr.write("HUD already running; played test sound only.\n")
         sys.exit(0)
     try:
-        TokenHud().run()
+        hud = TokenHud()
+        if test_buzz:
+            hud.root.after(400, hud.test_buzz)
+        hud.run()
     except tk.TclError as exc:
         sys.stderr.write(f"UI failed: {exc}\n")
         sys.exit(1)
