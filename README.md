@@ -1,12 +1,15 @@
-# Token HUD
+# TOKENMAXXING
+
+An AI usage command center — one place to read what you are burning across
+Cursor, Claude and Codex.
 
 Always-on-top window that answers three questions the Cursor UI splits apart:
 
-1. **This cycle -- where did the 75% go?** Other Models vs Cursor Models, dollars by chat, cloud vs local, burn rate.
+1. **Overview -- where did the 75% go?** Other Models vs Cursor Models, dollars by chat, cloud vs local, burn rate.
 2. **This chat -- how fat is the context window right now?** Same snapshot Cursor already writes to `state.vscdb`.
 3. **Resets -- when do Claude / Codex provider windows refresh?** 5-hour session and weekly countdowns, plus a Windows desktop buzz. Not the Cursor billing-cycle %.
 
-This is not an official Cursor product. Billing numbers come from the same unofficial `cursor.com` dashboard session the app already has (`cursorAuth/accessToken`). That JWT is never written to disk by this tool. Source: [aaltaay/token-hud](https://github.com/aaltaay/token-hud).
+This is not an official Cursor product. Billing numbers come from the same unofficial `cursor.com` dashboard session the app already has (`cursorAuth/accessToken`). That JWT is never written to disk by this tool. Source: [aaltaay/TokenMaxxing](https://github.com/aaltaay/TokenMaxxing).
 
 ## Why the old HUD felt useless
 
@@ -14,7 +17,7 @@ Cursor's agent prompt does not include billed `input_tokens` / `output_tokens`, 
 
 ## What the numbers mean
 
-### This cycle tab
+### Overview
 
 | You see | What it is |
 |---|---|
@@ -27,7 +30,7 @@ Cursor's agent prompt does not include billed `input_tokens` / `output_tokens`, 
 | cloud | Headless / cloud-agent events |
 | Grok Bot % | Separate weekly meter. Not the 75%. |
 
-### This chat tab
+### This chat
 
 | You see | What it is |
 |---|---|
@@ -37,11 +40,11 @@ Cursor's agent prompt does not include billed `input_tokens` / `output_tokens`, 
 | THIS CYCLE $ | Billed events whose `conversationId` matches this chat |
 | Next Grok Fast ~$ | Rough cache-read cost of one more turn at the current window size |
 
-Billed **output** is not a local field. It is on the cycle tab, from the dashboard.
+Billed **output** is not a local field. It is on the Overview, from the dashboard.
 
 Cache tokens are not stored in `promptTokenBreakdown`. Cycle-tab cache-read totals come from the dashboard.
 
-### Resets tab
+### Resets
 
 These clocks are **provider session / weekly windows** (Claude and Codex/ChatGPT). They are **not** Cursor Other Models %, Cursor Models %, Grok Bot weekly, or the billing cycle. v1 does not scrape Anthropic or OpenAI.
 
@@ -107,32 +110,92 @@ CLI (no window):
 ```bash
 python reset_schedule.py
 python reset_schedule.py --mark-session claude
-python token_hud.py --test-buzz
+python reset_schedule.py  # then use Test buzz in the app
 ```
 
-## UI
+## Architecture
 
-The HUD uses an Apple-inspired dark layout: near-black chrome (`#1c1c1e`), grouped cards, segmented tabs, thin capsule meters, and monospaced numbers. Visual / interaction polish only -- cycle fetch, chat follow, reset countdowns, Test buzz, and the single-instance lock are unchanged.
+The UI is Electron; the data engine is the same stdlib-only Python it always was.
+
+```
+app/                     Electron
+  main.js                window, Python discovery, NDJSON bridge, IPC
+  preload.js             the narrow `window.hud` surface the renderer gets
+  renderer/              index.html + styles.css + app.js -- the design
+hud_bridge.py            NDJSON server: one request per line, one thread each
+cursor_usage.py          state.vscdb reads + unofficial dashboard endpoints
+reset_schedule.py        Claude / Codex session + weekly window maths
+```
+
+Electron never touches `state.vscdb`, the dashboard, or the JWT. It spawns
+`hud_bridge.py` once and exchanges newline-delimited JSON with it:
+
+```
+-> {"id": 1, "cmd": "cycle", "args": {"force": true}}
+<- {"id": 1, "ok": true, "data": {...}}
+```
+
+Each request is served on its own thread, so a 90-second cycle fetch never
+blocks the one-second reset tick. `python hud_bridge.py --once resets` prints
+any single command's payload for debugging.
+
+## Design
+
+Dark, Apple-inspired: deep ground, grouped cards, hairline rules, pill
+controls, a segmented view switcher.
+
+The wordmark sets `TOKENMAXXING` in tight uppercase with the two X's tucked
+into each other, beside a capped ring with an arrow breaking out through the
+top — the meter going past its ceiling. Both are achromatic on purpose: the
+three provider hues own colour here, so the brand never competes with the data.
+
+The dial carries **one band per provider**, outermost first. Two kinds of meter
+share it and are drawn differently on purpose:
+
+| Band | Meaning | Drawn as |
+|---|---|---|
+| Cursor | share of included usage consumed | solid, thick |
+| Claude, Codex | how far through the session window | dashed, thin |
+
+A dashed band can never be misread as a consumption percentage, and the legend
+prints a percentage for one and a countdown for the other. Ring colour is
+**identity** -- a provider keeps its hue at 4% or 104%. Severity (amber, red) is
+reserved for the attention card, an exhausted pool's number, and the reset
+clocks, so red means "this needs you" rather than "this is a provider".
+
+The three colours are the first three slots of a categorical palette validated
+all-pairs against this surface for normal and colour-deficient vision.
 
 ## Requirements
 
-- Python 3.10+ (stdlib only: `tkinter`, `sqlite3`, `urllib`; `winsound` on Windows; `zoneinfo` with a built-in Eastern fallback)
-- Cursor desktop, signed in, with at least one agent chat so `state.vscdb` exists (cycle + chat tabs). The Resets tab works without that.
+- **Node.js 18+** for the Electron shell
+- **Python 3.10+** for the engine (stdlib only: `sqlite3`, `urllib`; `winsound`
+  on Windows; `zoneinfo` with a built-in Eastern fallback). Set
+  `TOKEN_HUD_PYTHON` if your interpreter is not on `PATH`.
+- Cursor desktop, signed in, with at least one agent chat so `state.vscdb`
+  exists (Overview + This chat). Resets works without that.
 
 ## Run it
 
 ```bash
-python token_hud.py
+./start.sh          # macOS / Linux
+start.bat           # Windows -- no console window
 ```
 
-On Windows, `start.bat` launches it without a console (`pythonw` if available). Closing the window is fine. Starting it again only allows one copy.
+Either one installs Electron on first run, then launches the app. Or directly:
+
+```bash
+cd app && npm install && npm start
+```
+
+Closing the window is fine. Starting it again only allows one copy.
 
 `python cursor_usage.py` prints a text cycle summary (add `--refresh` to bypass the 3-minute cache).
 `python reset_schedule.py` prints Claude / Codex reset countdowns.
 
-The HUD follows `cursor/glass.selectedAgent`. If the tab switch lags, click a chat in the list, or hit **Follow Cursor tab**.
+The app follows `cursor/glass.selectedAgent`. If the tab switch lags, pick a chat from the list on **This chat**, or hit **Follow active** to go back to tracking Cursor.
 
-Cycle usage refreshes about every 3 minutes, or when you click **Refresh usage**. Local context still updates about once a second.
+Cycle usage refreshes about every 4 minutes, or when you click refresh in the title bar. Local context updates about every 2 seconds, and the reset clocks tick every second.
 
 ### Database path
 
@@ -148,13 +211,13 @@ Cache / config (no secrets):
 
 ### Open with Cursor (optional)
 
-1. Copy `token_hud.py`, `cursor_usage.py`, `reset_schedule.py`, `start.bat`, and `start.vbs` to `~/.cursor/token-hud/`
+1. Copy the whole repository (including `app/`) to `~/.cursor/token-hud/`
 2. Copy `examples/start-token-hud.cmd` to `~/.cursor/hooks/start-token-hud.cmd`
 3. Merge `examples/hooks.json` into `~/.cursor/hooks.json`
 
 `sessionStart` then launches the HUD when an agent session starts. If it is already running, the second launch exits immediately.
 
-On Windows you can also drop `start.vbs` in the Startup folder, and keep a Desktop / Start Menu shortcut named **Token HUD**.
+On Windows you can also drop `start.vbs` in the Startup folder, and keep a Desktop / Start Menu shortcut named **TOKENMAXXING**.
 
 ### Cursor CLI status line (optional)
 
@@ -170,7 +233,7 @@ On Windows you can also drop `start.vbs` in the Startup folder, and keep a Deskt
 }
 ```
 
-CLI `total_output_tokens` is often null. Billed output is on the HUD cycle tab.
+CLI `total_output_tokens` is often null. Billed output is on the Overview.
 
 ## How to actually spend less
 

@@ -1,0 +1,15 @@
+{
+  "name": "tokenmaxxing",
+  "productName": "TOKENMAXXING",
+  "version": "2.0.0",
+  "description": "One place to read AI usage across Cursor, Claude and Codex.",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "devDependencies": {
+    "electron": "^32.0.0"
+  }
+}

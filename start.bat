@@ -1,13 +1,22 @@
 @echo off
-cd /d "%~dp0"
-where pythonw >nul 2>&1
-if %errorlevel%==0 (
-  start "" pythonw "%~dp0token_hud.py"
-  exit /b 0
+rem Launch the AI Usage Command Center (Electron UI + Python engine).
+cd /d "%~dp0app"
+
+where npm >nul 2>&1
+if not %errorlevel%==0 (
+  echo Node.js is required. Install it from https://nodejs.org and run this again.
+  pause
+  exit /b 1
 )
-where py >nul 2>&1
-if %errorlevel%==0 (
-  start "" pyw -3 "%~dp0token_hud.py"
-  exit /b 0
+
+if not exist "node_modules" (
+  echo First run: installing Electron...
+  call npm install --no-audit --no-fund
+  if not %errorlevel%==0 (
+    echo npm install failed.
+    pause
+    exit /b 1
+  )
 )
-start "" python "%~dp0token_hud.py"
+
+start "" /b npm start
