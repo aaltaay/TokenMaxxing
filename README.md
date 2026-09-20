@@ -61,7 +61,7 @@ These clocks are **provider session / weekly windows** (Claude and Codex/ChatGPT
 
 **Buzz rules**
 
-- Windows: two-tone `winsound.Beep` plus a short topmost banner / window flash inside this HUD.
+- Windows: two-tone `winsound.Beep` plus a soft banner in-app and a taskbar flash. No red strobe.
 - Optional pre-warn (default **on**, **2 minutes** before). Config: `prewarn_enabled`, `prewarn_minutes`.
 - The same reset id is persisted in `~/.cursor/token-hud/reset-buzzed.json` so one fire does not spam.
 - Session clocks **do not buzz** until you mark a session start (otherwise the rolling guess would beep at 00:00 / 05:00 / 10:00 ET).
@@ -103,7 +103,7 @@ Default shape (weekly times are placeholders):
 - Session with an anchor: windows are `anchor + n * session_hours`. Next fire is the next boundary after now.
 - Session without an anchor: rolling 5-hour slots from midnight America/New_York. Countdown only; no buzz until you re-anchor.
 - Weekly: next occurrence of `weekly_weekday` at `weekly_time` Eastern, then every 7 days.
-- The HUD checks these clocks on the existing `root.after` loop (about once a second). It never blocks the UI thread for network.
+- The app checks these clocks on the existing refresh loop (about once a second). It never blocks the UI thread for network.
 
 CLI (no window):
 
@@ -112,6 +112,10 @@ python reset_schedule.py
 python reset_schedule.py --mark-session claude
 python reset_schedule.py  # then use Test buzz in the app
 ```
+
+![TokenMaxxing overview](screenshot.png)
+
+*Overview, painted from a seeded cycle so the numbers are reproducible.*
 
 ## Architecture
 
@@ -203,7 +207,7 @@ Cycle usage refreshes about every 4 minutes, or when you click refresh in the ti
 - macOS: `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`
 - Linux: `~/.config/Cursor/User/globalStorage/state.vscdb`
 
-Cache / config (no secrets):
+Cache / config (no secrets). The runtime folder is still `token-hud` so existing installs keep working:
 
 - `~/.cursor/token-hud/cycle-cache.json` -- last Cursor dashboard snapshot
 - `~/.cursor/token-hud/reset-schedule.json` -- Claude / Codex reset clocks
