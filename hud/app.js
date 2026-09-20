@@ -1,4 +1,4 @@
-/* Token HUD front-end. Renders /api/state. No billing or reset math here. */
+/* TokenMaxxing front-end. Renders /api/state. No billing or reset math here. */
 
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (ch) => ({

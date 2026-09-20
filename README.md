@@ -1,4 +1,4 @@
-# Token HUD
+# TokenMaxxing
 
 Always-on-top window that answers three questions the Cursor UI splits apart:
 
@@ -6,7 +6,7 @@ Always-on-top window that answers three questions the Cursor UI splits apart:
 2. **This chat -- how fat is the context window right now?** Same snapshot Cursor already writes to `state.vscdb`.
 3. **Resets -- when do Claude / Codex provider windows refresh?** 5-hour session and weekly countdowns, plus a Windows desktop buzz. Not the Cursor billing-cycle %.
 
-This is not an official Cursor product. Billing numbers come from the same unofficial `cursor.com` dashboard session the app already has (`cursorAuth/accessToken`). That JWT is never written to disk by this tool. Source: [aaltaay/token-hud](https://github.com/aaltaay/token-hud).
+This is not an official Cursor product. Billing numbers come from the same unofficial `cursor.com` dashboard session the app already has (`cursorAuth/accessToken`). That JWT is never written to disk by this tool. Source: [aaltaay/TokenMaxxing](https://github.com/aaltaay/TokenMaxxing).
 
 ## Why the old HUD felt useless
 
@@ -112,13 +112,13 @@ python token_hud.py --test-buzz
 
 ## UI
 
-The HUD follows [OpenDesign Apple](https://open-design.ai/plugins/design-system-apple/) design-system tokens (light): white / light gray surfaces (`#ffffff`, `#f5f5f7`, `#fbfbfd`), near-black ink (`#1d1d1f`), quiet borders, and Apple blue (`#0071e3`) only for primary actions, links, and the active segment. Tokens live in `opendesign_apple.py` so later chrome edits stay on-system.
+TokenMaxxing follows [OpenDesign Apple](https://open-design.ai/plugins/design-system-apple/) design-system tokens (light): white / light gray surfaces (`#ffffff`, `#f5f5f7`, `#fbfbfd`), near-black ink (`#1d1d1f`), quiet borders, and Apple blue (`#0071e3`) only for primary actions, links, and the active segment. Tokens live in `opendesign_apple.py` so later chrome edits stay on-system.
 
 SF Pro is not assumed to be installed. Type falls back to **Segoe UI Variable** (Display / Text) then Segoe UI on Windows; numbers use Cascadia Mono / Consolas. Scale is 12 / 14 / 17 / 21 / 28 with 400 body and 600 emphasis.
 
-The window is an HTML/CSS shell driven by the existing Python backend (local `http://127.0.0.1:47821/`). Prefer `pip install pywebview` for a native always-on-top WebView2 window. Without it, Token HUD opens Edge or Chrome in `--app=` mode and pins that window topmost. Cycle fetch, chat follow, reset countdowns, Test buzz, and the single-instance lock are unchanged. Buzz shows a soft accent banner -- no red strobe.
+The window is an HTML/CSS shell driven by the existing Python backend (local `http://127.0.0.1:47821/`). Prefer `pip install pywebview` for a native always-on-top WebView2 window. Without it, TokenMaxxing opens Edge or Chrome in `--app=` mode and pins that window topmost. Cycle fetch, chat follow, reset countdowns, Test buzz, and the single-instance lock are unchanged. Buzz shows a soft accent banner -- no red strobe.
 
-![Token HUD on the OpenDesign Apple light canvas](screenshot.png)
+![TokenMaxxing on the OpenDesign Apple light canvas](screenshot.png)
 
 ## Requirements
 
@@ -134,12 +134,12 @@ python token_hud.py
 
 On Windows, `start.bat` launches it without a console (`pythonw` if available). Closing the window is fine. Starting it again only allows one copy.
 
-`python token_hud.py --demo` paints a sample cycle so you can judge the light Apple chrome without a Cursor session. `python token_hud.py --no-window` serves the HUD and prints the local URL.
+`python token_hud.py --demo` paints a sample cycle so you can judge the light Apple chrome without a Cursor session. `python token_hud.py --no-window` serves the window and prints the local URL.
 
 `python cursor_usage.py` prints a text cycle summary (add `--refresh` to bypass the 3-minute cache).
 `python reset_schedule.py` prints Claude / Codex reset countdowns.
 
-The HUD follows `cursor/glass.selectedAgent`. If the tab switch lags, click a chat in the list, or hit **Follow Cursor tab**.
+TokenMaxxing follows `cursor/glass.selectedAgent`. If the tab switch lags, click a chat in the list, or hit **Follow Cursor tab**.
 
 Cycle usage refreshes about every 3 minutes, or when you click **Refresh usage**. Local context still updates about once a second.
 
@@ -149,21 +149,26 @@ Cycle usage refreshes about every 3 minutes, or when you click **Refresh usage**
 - macOS: `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`
 - Linux: `~/.config/Cursor/User/globalStorage/state.vscdb`
 
-Cache / config (no secrets):
+Cache / config (no secrets). Runtime folder is still `token-hud` so existing installs keep working:
 
 - `~/.cursor/token-hud/cycle-cache.json` -- last Cursor dashboard snapshot
 - `~/.cursor/token-hud/reset-schedule.json` -- Claude / Codex reset clocks
 - `~/.cursor/token-hud/reset-buzzed.json` -- last-fired reset event ids (dedupe)
 
+On Ahmed's Windows box:
+
+- Source checkout: `C:\Users\aalta\github\TokenMaxxing`
+- Runtime cache/config: `C:\Users\aalta\.cursor\token-hud`
+
 ### Open with Cursor (optional)
 
-1. Copy `token_hud.py`, `cursor_usage.py`, `reset_schedule.py`, `opendesign_apple.py`, the `hud/` folder, `start.bat`, and `start.vbs` to `~/.cursor/token-hud/`
+1. Copy `token_hud.py`, `cursor_usage.py`, `reset_schedule.py`, `opendesign_apple.py`, the `hud/` folder, `start.bat`, and `start.vbs` to `~/.cursor/token-hud/` (Windows: `C:\Users\aalta\.cursor\token-hud\`)
 2. Copy `examples/start-token-hud.cmd` to `~/.cursor/hooks/start-token-hud.cmd`
 3. Merge `examples/hooks.json` into `~/.cursor/hooks.json`
 
-`sessionStart` then launches the HUD when an agent session starts. If it is already running, the second launch exits immediately.
+`sessionStart` then launches TokenMaxxing when an agent session starts. If it is already running, the second launch exits immediately.
 
-On Windows you can also drop `start.vbs` in the Startup folder, and keep a Desktop / Start Menu shortcut named **Token HUD**.
+On Windows you can also drop `start.vbs` in the Startup folder, and keep a Desktop / Start Menu shortcut named **TokenMaxxing**.
 
 ### Cursor CLI status line (optional)
 
@@ -179,7 +184,7 @@ On Windows you can also drop `start.vbs` in the Startup folder, and keep a Deskt
 }
 ```
 
-CLI `total_output_tokens` is often null. Billed output is on the HUD cycle tab.
+CLI `total_output_tokens` is often null. Billed output is on the TokenMaxxing cycle tab.
 
 ## How to actually spend less
 

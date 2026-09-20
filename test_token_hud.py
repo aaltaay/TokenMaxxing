@@ -21,6 +21,11 @@ class DesignHelpersTest(unittest.TestCase):
         self.assertEqual(pct_color(50), SOON)
         self.assertEqual(pct_color(75), NOW)
 
+    def test_app_name(self) -> None:
+        from token_hud import APP_NAME
+
+        self.assertEqual(APP_NAME, "TokenMaxxing")
+
     def test_status_kind(self) -> None:
         from token_hud import status_kind
 
@@ -108,7 +113,7 @@ class ResetsTabTest(HudCase):
 
         hud = TokenHud()
         self.addCleanup(hud.root.destroy)
-        self.assertEqual(hud.root.title(), "Token HUD")
+        self.assertEqual(hud.root.title(), "TokenMaxxing")
         tabs = [hud.nb.tab(i, "text").strip() for i in hud.nb.tabs()]
         self.assertEqual(tabs, ["This cycle", "This chat", "Resets"])
         hud.nb.select(hud.tab_resets)
@@ -248,7 +253,7 @@ class HttpHudTest(HudCase):
 
         with urlopen(base + "/") as resp:
             html = resp.read().decode("utf-8")
-        self.assertIn("Token HUD", html)
+        self.assertIn("TokenMaxxing", html)
         self.assertIn("Test buzz", html)
 
         req = Request(

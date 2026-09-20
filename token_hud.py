@@ -1,4 +1,4 @@
-"""Always-on-top Token HUD.
+"""Always-on-top TokenMaxxing window.
 
 Tab 1: this billing cycle (the 75% question).
 Tab 2: the selected chat's context window, plus billed $ for that chat.
@@ -48,6 +48,7 @@ from reset_schedule import (
     snapshot_resets,
 )
 
+APP_NAME = "TokenMaxxing"
 REFRESH_MS = 800
 BILLING_POLL_MS = 4000
 RESET_TICK_MS = 1000
@@ -452,7 +453,7 @@ class ListBox:
 class DummyRoot:
     def __init__(self, hud: "TokenHud") -> None:
         self._hud = hud
-        self._title = "Token HUD"
+        self._title = APP_NAME
 
     def title(self, value: str | None = None):
         if value is not None:
@@ -1232,7 +1233,7 @@ def launch_app_window(url: str) -> subprocess.Popen | None:
     cmd = find_browser()
     if not cmd:
         return None
-    profile = Path(tempfile.gettempdir()) / "token-hud-chrome-profile"
+    profile = Path(tempfile.gettempdir()) / "tokenmaxxing-chrome-profile"
     args = cmd + [
         f"--app={url}",
         f"--user-data-dir={profile}",
@@ -1240,7 +1241,7 @@ def launch_app_window(url: str) -> subprocess.Popen | None:
         "--no-default-browser-check",
         f"--window-size={WIN_W},{WIN_H}",
         "--window-position=40,60",
-        "--class=TokenHUD",
+        "--class=TokenMaxxing",
     ]
     try:
         return subprocess.Popen(args)
@@ -1248,7 +1249,7 @@ def launch_app_window(url: str) -> subprocess.Popen | None:
         return None
 
 
-def pin_topmost_windows(title: str = "Token HUD") -> bool:
+def pin_topmost_windows(title: str = APP_NAME) -> bool:
     try:
         import ctypes
         from ctypes import wintypes
@@ -1280,7 +1281,7 @@ def pin_topmost_windows(title: str = "Token HUD") -> bool:
     return bool(hits)
 
 
-def pin_topmost_linux(title: str = "Token HUD") -> bool:
+def pin_topmost_linux(title: str = APP_NAME) -> bool:
     commands = []
     if shutil.which("wmctrl"):
         commands.append(["wmctrl", "-r", title, "-b", "add,above"])
@@ -1296,7 +1297,7 @@ def pin_topmost_linux(title: str = "Token HUD") -> bool:
     return ok
 
 
-def pin_topmost_loop(proc: subprocess.Popen, title: str = "Token HUD") -> None:
+def pin_topmost_loop(proc: subprocess.Popen, title: str = APP_NAME) -> None:
     deadline = time.time() + 20
     while proc.poll() is None:
         if sys.platform == "win32":
@@ -1312,7 +1313,7 @@ def try_pywebview(url: str) -> bool:
     except ImportError:
         return False
     webview.create_window(
-        "Token HUD",
+        APP_NAME,
         url,
         width=WIN_W,
         height=WIN_H,
@@ -1341,7 +1342,7 @@ def open_hud_window(url: str) -> None:
     except Exception:
         pass
     sys.stderr.write(
-        f"Token HUD is serving {url}\n"
+        f"{APP_NAME} is serving {url}\n"
         "Install Edge/Chrome, or `pip install pywebview`, for an app window.\n"
     )
     try:

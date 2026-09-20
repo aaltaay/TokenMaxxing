@@ -1,6 +1,6 @@
 """OpenDesign Apple design-system tokens.
 
-Source of truth for Token HUD chrome. Values are the published
+Source of truth for TokenMaxxing chrome. Values are the published
 OpenDesign Apple contract (https://open-design.ai/plugins/design-system-apple/).
 Do not invent a second accent palette. Blue is for primary actions,
 links, and the active segment only.
