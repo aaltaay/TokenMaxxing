@@ -34,6 +34,29 @@ test('title changes track the open chat; stale or malformed readings are unavail
   } finally { tracker.stop(); }
 });
 
+test('the Claude desktop title is tracked beside the Codex one and goes stale with it', () => {
+  let now = 100;
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter(); child.stdout.setEncoding = () => {};
+  child.kill = () => {};
+  const tracker = new ActiveChat({platform:'win32',script:'active-chat.ps1',now:()=>now,spawnProcess:()=>child});
+  try {
+    tracker.start();
+    child.stdout.emit('data','{"title":"Codex chat","claude":"Pull latest master changes"}\n');
+    assert.equal(tracker.currentTitle(),'Codex chat');
+    assert.equal(tracker.currentTitle('codex'),'Codex chat');
+    assert.equal(tracker.currentTitle('claude'),'Pull latest master changes');
+    child.stdout.emit('data','{"title":null,"claude":null}\n');
+    assert.equal(tracker.currentTitle('claude'),null);
+    child.stdout.emit('data','{"title":"Only Codex"}\n');
+    assert.equal(tracker.currentTitle('claude'),null);
+    child.stdout.emit('data','{"claude":"Back"}\n');
+    assert.equal(tracker.currentTitle('claude'),'Back');
+    now += 4001;
+    assert.equal(tracker.currentTitle('claude'),null);
+  } finally { tracker.stop(); }
+});
+
 test('non-Windows launches do not spawn an accessibility reader', () => {
   const tracker = new ActiveChat({platform:'linux',spawnProcess:()=>{throw new Error('must not run');}});
   tracker.start();

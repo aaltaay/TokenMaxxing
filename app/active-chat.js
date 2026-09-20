@@ -9,10 +9,13 @@ class ActiveChat {
     this.spawnProcess = spawnProcess;
     this.now = now;
     this.title = null;
+    this.claudeTitle = null;
     this.observedAt = 0;
   }
-  currentTitle() {
-    return this.now() - this.observedAt < 4000 ? this.title : null;
+  /** The open chat's title for a provider, or null once the reading is stale. */
+  currentTitle(provider = 'codex') {
+    if (this.now() - this.observedAt >= 4000) return null;
+    return provider === 'claude' ? this.claudeTitle : this.title;
   }
   start() {
     if (this.platform !== 'win32' || this.child) return;
@@ -26,24 +29,26 @@ class ActiveChat {
     child.stdout.on('data', chunk => {
       if (this.child !== child) return;
       this.buffer += chunk;
-      if (this.buffer.length > 65536) { this.buffer = ''; this.title = null; return; }
+      if (this.buffer.length > 65536) { this.buffer = ''; this.title = null; this.claudeTitle = null; return; }
       let index;
       while ((index = this.buffer.indexOf('\n')) >= 0) {
         const line = this.buffer.slice(0, index).trim();
         this.buffer = this.buffer.slice(index + 1);
         try {
           const value = JSON.parse(line);
-          this.title = typeof value.title === 'string' && value.title.length <= 1000 ? value.title : null;
+          const text = (v) => typeof v === 'string' && v.length <= 1000 ? v : null;
+          this.title = text(value.title);
+          this.claudeTitle = text(value.claude);
           this.observedAt = this.now();
-        } catch { this.title = null; }
+        } catch { this.title = null; this.claudeTitle = null; }
       }
     });
-    const clear = () => { if (this.child === child) { this.title = null; this.child = null; } };
+    const clear = () => { if (this.child === child) { this.title = null; this.claudeTitle = null; this.child = null; } };
     child.on('error', clear);
     child.on('exit', clear);
     if (!this.watchdog) {
       this.watchdog = setInterval(() => {
-        if (this.child && this.now() - this.observedAt > 15000) { this.child.kill(); this.child = null; this.title = null; }
+        if (this.child && this.now() - this.observedAt > 15000) { this.child.kill(); this.child = null; this.title = null; this.claudeTitle = null; }
         if (!this.child) this.start();
       }, 5000);
       this.watchdog.unref?.();
@@ -55,6 +60,7 @@ class ActiveChat {
     this.child?.kill();
     this.child = null;
     this.title = null;
+    this.claudeTitle = null;
   }
 }
 module.exports = {ActiveChat};

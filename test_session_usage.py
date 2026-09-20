@@ -117,6 +117,30 @@ class SessionsTest(unittest.TestCase):
             self.assertEqual(pinned['chat']['id'],'old')
             self.assertIsNone(pinned['follow_source'])
 
+    def test_open_claude_window_title_selects_that_session_ahead_of_the_busiest_log(self):
+        config=Path(self.tmp.name)/'claude';(config/'sessions').mkdir(parents=True)
+        (config/'sessions'/'1.json').write_text(json.dumps({'pid':1,'sessionId':'nova','name':'Pull latest','updatedAt':5}),encoding='utf-8')
+        (config/'sessions'/'2.json').write_text(json.dumps({'pid':2,'sessionId':'busy','name':'Usage tracking','updatedAt':9}),encoding='utf-8')
+        (config/'sessions'/'3.json').write_text('{not json',encoding='utf-8')
+        rows=[{'id':'busy','name':'busy','used':1,'updated_at':time.time()-5},
+              {'id':'nova','name':'nova','used':2,'updated_at':time.time()-200}]
+        home=Path(self.tmp.name)/'hud4';home.mkdir()
+        with patch.dict(s.os.environ,{'CLAUDE_CONFIG_DIR':str(config),'TOKENMAXXING_HOME':str(home)}), patch.object(s,'file_sessions',return_value=rows):
+            self.assertEqual(s.claude_titles(),{'nova':'Pull latest','busy':'Usage tracking'})
+            shown=s.get_sessions('claude',follow='active',active_title='Pull latest')
+            self.assertEqual(shown['chat']['id'],'nova')
+            self.assertEqual(shown['follow_source'],'open window')
+            self.assertEqual(shown['chat']['name'],'Pull latest · nova')
+            self.assertEqual([c['name'] for c in shown['chats']],['Usage tracking · busy','Pull latest · nova'])
+            s._cache.clear()
+            unknown=s.get_sessions('claude',follow='active',active_title='Never seen')
+            self.assertEqual(unknown['chat']['id'],'busy')
+            self.assertEqual(unknown['follow_source'],'recent log')
+            s._cache.clear()
+            pointer_wins=s.get_sessions('claude',follow='latest',active_title='Pull latest')
+            self.assertEqual(pointer_wins['chat']['id'],'busy')
+            self.assertIsNone(pointer_wins['follow_source'])
+
     def test_selected_claude_cost_is_estimated_from_its_log(self):
         self.path.write_text(json.dumps({'type':'assistant','sessionId':'c1','requestId':'r1','cwd':'/w/proj','message':{'model':'claude-opus-5',
             'usage':{'input_tokens':1_000_000,'cache_read_input_tokens':0,'cache_creation_input_tokens':0,'output_tokens':0}}})+'\n',encoding='utf-8')

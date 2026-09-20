@@ -129,6 +129,29 @@ def parse_cached(provider, path, modified, full=True):
     return dict(session) if session else session
 
 
+def claude_titles():
+    """Titles of live Claude Code sessions, from the per-process registry the
+    CLI keeps under its config folder. Identifiers and names only."""
+    root = Path(os.environ.get('CLAUDE_CONFIG_DIR', Path.home()/'.claude'))/'sessions'
+    titles, stamps = {}, {}
+    try:
+        files = list(root.glob('*.json'))
+    except OSError:
+        return titles
+    for path in files:
+        try:
+            if path.stat().st_size > 64 * 1024: continue
+            row = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError, UnicodeError): continue
+        if not isinstance(row, dict): continue
+        ident, name = row.get('sessionId'), row.get('name')
+        if not isinstance(ident, str) or not isinstance(name, str) or not name: continue
+        stamp = numeric(row.get('updatedAt')) or 0
+        if ident not in titles or stamp >= stamps[ident]:
+            titles[ident], stamps[ident] = name, stamp
+    return titles
+
+
 def codex_titles():
     path = Path(os.environ.get('CODEX_HOME', Path.home()/'.codex'))/'session_index.jsonl'
     try:
@@ -265,12 +288,14 @@ def _claude_live(selected, pointer):
 def get_sessions(provider='codex', pinned=None, follow='latest', active_title=None):
     if provider not in ('codex','claude','cursor'): raise ValueError('Unknown session provider')
     if follow not in ('latest', 'active'): raise ValueError('Unknown follow mode')
-    titles = codex_titles() if provider == 'codex' else {}
+    titles = codex_titles() if provider == 'codex' else claude_titles() if provider == 'claude' else {}
     active = provider in ('codex', 'claude') and follow == 'active' and not pinned
     pointer = active_pointer(provider) if active else None
     matches = [ident for ident, title in titles.items() if title == active_title] if active_title else []
     target = pinned
     if target is None and active:
+        # The status line names the exact session; the desktop window names
+        # the open session's title, which the registry maps back to an id.
         target = pointer.get('session_id') if pointer else (matches[0] if len(matches) == 1 else None)
     key = (provider, target)
     with _lock:
@@ -282,7 +307,7 @@ def get_sessions(provider='codex', pinned=None, follow='latest', active_title=No
         else: sessions=cached[1]
     sessions = [{**s, 'name': f"{titles[s['id']]} · {s['id'][:8]}" if s['id'] in titles else s['name']} for s in sessions]
     selected = next((s for s in sessions if s['id']==target),None) if target else (None if active else next(iter(sessions),None))
-    follow_source = 'status line' if pointer and selected else None
+    follow_source = ('status line' if pointer else 'open window' if matches else None) if selected and active else None
     if active and provider == 'claude' and not selected and not pointer and sessions:
         newest = sessions[0]
         modified = numeric(newest.get('updated_at'))
@@ -291,7 +316,7 @@ def get_sessions(provider='codex', pinned=None, follow='latest', active_title=No
     reason = 'Pinned session is unavailable. Choose another session.' if pinned else 'No local session records found for this provider.'
     if active and not selected:
         if provider == 'claude':
-            reason = ('Open Claude Code session has no local log yet. Choose a session manually.' if pointer else
+            reason = ('Open Claude Code session has no local log yet. Choose a session manually.' if pointer or matches else
                       'No Claude Code session has been active in the last 15 minutes. Open one, or choose a session manually.')
         else:
             reason = ('More than one local chat has this title. Select the chat manually.' if len(matches) > 1 else
