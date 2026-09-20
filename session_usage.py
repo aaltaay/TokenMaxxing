@@ -6,37 +6,58 @@ import threading
 import time
 from pathlib import Path
 import cursor_usage as cu
+import session_cost
+
+HEAD_BYTES = 128 * 1024
+TAIL_BYTES = 2 * 1024 * 1024
+LIST_LIMIT = 100
+# A status line reports the chat a person is actually typing in. Anything
+# older than this is treated as unknown rather than followed.
+POINTER_MAX_AGE = 600
 
 _lock = threading.Lock()
 _cache = {}
+# Parsed sessions keyed by (path, mtime_ns, size): an unchanged log is never
+# re-read, so a two-second poll costs one parse of the log being written.
+_parsed = {}
+_parsed_lock = threading.Lock()
 
 
 def numeric(value):
     return value if isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0 else None
 
 
-def read_records(path):
+def _load(line):
+    try:
+        item = json.loads(line)
+    except (ValueError, UnicodeError):
+        return None
+    return item if isinstance(item, dict) else None
+
+
+def read_records(path, full=True):
+    """Head record plus a bounded tail; head only when a summary is enough."""
     with path.open('rb') as stream:
-        head = stream.readline(131072)
+        head = stream.readline(HEAD_BYTES)
+        if not full:
+            return [item for item in (_load(head),) if item is not None]
         stream.seek(0, 2)
         size = stream.tell()
-        start = max(0, size - 2 * 1024 * 1024)
+        start = max(0, size - TAIL_BYTES)
         stream.seek(start)
         if start:
             stream.readline()
-        tail = stream.read(2 * 1024 * 1024)
+        tail = stream.read(TAIL_BYTES)
     records = []
     for line in ([head] if start else []) + tail.splitlines():
-        try:
-            item = json.loads(line)
-            if isinstance(item, dict): records.append(item)
-        except (ValueError, UnicodeError):
-            continue
+        item = _load(line)
+        if item is not None:
+            records.append(item)
     return records
 
 
-def parse_session(provider, path, modified):
-    records = read_records(path)
+def parse_session(provider, path, modified, full=True):
+    records = read_records(path, full)
     result = dict(id=path.stem, name=path.stem[-12:], model=None, updated_at=modified,
                   usage_at=None, used=None, limit=None, pct=None, cats={}, cat_rows=[],
                   metrics={}, source=f'{provider} local session log', provider=provider)
@@ -85,6 +106,25 @@ def parse_session(provider, path, modified):
     return result
 
 
+def parse_cached(provider, path, modified, full=True):
+    """Parse once per (file, size, mtime); polling an idle log costs nothing."""
+    try:
+        stat = path.stat()
+        key = (provider, str(path), stat.st_mtime_ns, stat.st_size, full)
+    except OSError:
+        return None
+    with _parsed_lock:
+        if key in _parsed:
+            cached = _parsed[key]
+            return dict(cached) if cached else cached
+    session = parse_session(provider, path, modified, full)
+    with _parsed_lock:
+        if len(_parsed) >= 300:
+            _parsed.clear()
+        _parsed[key] = session
+    return dict(session) if session else session
+
+
 def codex_titles():
     path = Path(os.environ.get('CODEX_HOME', Path.home()/'.codex'))/'session_index.jsonl'
     try:
@@ -94,23 +134,54 @@ def codex_titles():
         return {}
 
 
-def file_sessions(provider, selected_id=None):
-    root = (Path(os.environ.get('CODEX_HOME', Path.home()/'.codex'))/'sessions' if provider == 'codex'
+def hud_home():
+    return Path(os.environ.get('TOKENMAXXING_HOME') or Path.home()/'.tokenmaxxing')
+
+
+def active_pointer(provider, now=None):
+    """Read the status-line pointer for the chat a person is typing in.
+
+    Written by ``cli_statusline.py`` from Claude Code's own status-line input.
+    It carries identifiers and counters only, never transcript content.
+    """
+    if provider != 'claude':
+        return None
+    try:
+        data = json.loads((hud_home()/'claude-active.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get('session_id'), str):
+        return None
+    stamp = numeric(data.get('at'))
+    if stamp is None or (now or time.time()) - stamp > POINTER_MAX_AGE:
+        return None
+    return data
+
+
+def session_root(provider):
+    return (Path(os.environ.get('CODEX_HOME', Path.home()/'.codex'))/'sessions' if provider == 'codex'
             else Path(os.environ.get('CLAUDE_CONFIG_DIR', Path.home()/'.claude'))/'projects')
+
+
+def file_sessions(provider, selected_id=None):
+    """List recent logs from their head record only; the tail is read once a
+    session is selected, so the list stays cheap with large logs."""
     entries = []
-    for path in root.rglob('*.jsonl'):
+    for path in session_root(provider).rglob('*.jsonl'):
         if 'subagents' in path.parts or path.name.startswith('agent-'): continue
         try: entries.append((path.stat().st_mtime, path))
         except OSError: continue
     sessions = []
     ordered = sorted(entries, key=lambda item:item[0], reverse=True)
-    chosen = ordered[:100]
+    chosen = ordered[:LIST_LIMIT]
     if selected_id:
-        chosen += [entry for entry in ordered[100:] if entry[1].stem.endswith(selected_id)]
+        chosen += [entry for entry in ordered[LIST_LIMIT:] if entry[1].stem.endswith(selected_id)]
     for modified,path in chosen:
         try:
-            session = parse_session(provider,path,modified)
-            if session: sessions.append(session)
+            session = parse_cached(provider,path,modified,full=False)
+            if session:
+                session['_path'] = str(path)
+                sessions.append(session)
         except (OSError, ValueError, TypeError): continue
     return sessions
 
@@ -137,13 +208,66 @@ def cursor_sessions():
     finally: con.close()
 
 
+def _detail(provider, selected):
+    """Full read of the one selected log, with its recorded usage and cost."""
+    path = selected.pop('_path', None)
+    if provider == 'cursor' or not path:
+        return selected
+    detailed = None
+    try:
+        detailed = parse_cached(provider, Path(path), selected.get('updated_at'), full=True)
+    except (OSError, ValueError, TypeError):
+        detailed = None
+    if detailed:
+        detailed.pop('_path', None)
+        detailed['name'] = selected.get('name') or detailed.get('name')
+        selected = detailed
+    if provider == 'codex':
+        try:
+            selected['cost'] = session_cost.estimate_file(path)
+        except (OSError, ValueError, TypeError):
+            selected['cost'] = None
+    return selected
+
+
+def _claude_live(selected, pointer):
+    """Add the status line's own counters for the chat it points at."""
+    if not pointer or pointer.get('session_id') != selected.get('id'):
+        return selected
+    window = pointer.get('context_window') if isinstance(pointer.get('context_window'), dict) else {}
+    limit = numeric(window.get('context_window_size'))
+    used = numeric(window.get('total_input_tokens'))
+    if limit is not None:
+        selected['limit'] = limit
+    if used is not None:
+        selected['used'] = used
+        selected['pct'] = numeric(window.get('used_percentage'))
+        selected['usage_at'] = None
+        selected['measurement'] = 'Live context reported by the Claude Code status line.'
+        selected['source'] = 'Claude Code status line'
+        selected['metrics'] = {label: numeric(window.get(key)) for label, key in [
+            ('Context input tokens', 'total_input_tokens'),
+            ('Output tokens this session', 'total_output_tokens')]}
+    cost = numeric(pointer.get('cost_usd'))
+    if cost is not None:
+        selected['cost'] = {'cents': cost * 100, 'reported': True, 'partial': False,
+                            'priced_requests': None, 'last_request_cents': None, 'pricing_date': None,
+                            'basis': 'Reported by Claude Code for this session. API-equivalent value, '
+                                     'not a charge against a subscription.'}
+    selected['model'] = pointer.get('model') or selected.get('model')
+    return selected
+
+
 def get_sessions(provider='codex', pinned=None, follow='latest', active_title=None):
     if provider not in ('codex','claude','cursor'): raise ValueError('Unknown session provider')
     if follow not in ('latest', 'active'): raise ValueError('Unknown follow mode')
     titles = codex_titles() if provider == 'codex' else {}
-    active = provider == 'codex' and follow == 'active' and not pinned
+    active = provider in ('codex', 'claude') and follow == 'active' and not pinned
+    pointer = active_pointer(provider) if active else None
     matches = [ident for ident, title in titles.items() if title == active_title] if active_title else []
-    target = pinned or (matches[0] if active and len(matches) == 1 else None)
+    target = pinned
+    if target is None and active:
+        target = pointer.get('session_id') if pointer else (matches[0] if len(matches) == 1 else None)
     key = (provider, target)
     with _lock:
         cached = _cache.get(key)
@@ -156,9 +280,18 @@ def get_sessions(provider='codex', pinned=None, follow='latest', active_title=No
     selected = next((s for s in sessions if s['id']==target),None) if target else (None if active else next(iter(sessions),None))
     reason = 'Pinned session is unavailable. Choose another session.' if pinned else 'No local session records found for this provider.'
     if active and not selected:
-        reason = ('More than one local chat has this title. Select the chat manually.' if len(matches) > 1 else
-                  'Open chat has no matching local session record. Select a chat manually.' if active_title else
-                  'Open chat could not be detected. Open Codex, select a chat, or choose a session manually.')
+        if provider == 'claude':
+            reason = ('Open Claude Code session has no local log yet. Choose a session manually.' if pointer else
+                      'Open Claude Code session could not be detected. Add the TOKENMAXXING status line to '
+                      'Claude Code, or choose a session manually.')
+        else:
+            reason = ('More than one local chat has this title. Select the chat manually.' if len(matches) > 1 else
+                      'Open chat has no matching local session record. Select a chat manually.' if active_title else
+                      'Open chat could not be detected. Open Codex, select a chat, or choose a session manually.')
+    if selected:
+        selected = _detail(provider, dict(selected))
+        if provider == 'claude':
+            selected = _claude_live(selected, pointer or active_pointer('claude'))
     return {'available':True, 'provider':provider, 'pinned':pinned,
             'selection_mode': 'pinned' if pinned else 'active' if active else 'latest',
             'chats':[{'id':s['id'],'name':s['name']} for s in sessions], 'chat':dict(selected) if selected else None,

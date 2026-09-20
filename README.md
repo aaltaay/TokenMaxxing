@@ -6,8 +6,10 @@ The Electron window reads data through a Python bridge.
 ## What it shows
 
 - **Overview:** Cursor quota percentages, reported cycle usage value, token totals, and recorded event counts; Codex and Claude quota percentages when their services return them.
-- **Sessions:** choose Codex, Claude Code, or Cursor. On Windows, Codex defaults to **Open Codex chat**, matching the desktop's accessible document title to the local session index. Switching chats changes the displayed session within a few seconds, even when background tasks are running. **Latest activity** follows the newest log instead; selecting a session pins it. Selection is saved across restarts. Codex and Claude show the last recorded request's token usage; Cursor shows its saved context snapshot and estimated category breakdown. Unknown metrics remain unavailable.
+- **Sessions:** choose Codex, Claude Code, or Cursor. Claude Code defaults to **Open Claude Code session**, following the chat its status line reports (see *Follow the Claude Code session you are typing in*). On Windows, Codex defaults to **Open Codex chat**, matching the desktop's accessible document title to the local session index. Switching chats changes the displayed session within a few seconds, even when background tasks are running. **Latest activity** follows the newest log instead; selecting a session pins it. Selection is saved across restarts. Codex and Claude show the last recorded request's token usage; Cursor shows its saved context snapshot and estimated category breakdown. Unknown metrics remain unavailable.
 - **Resets:** reset times returned by the provider alongside the relevant usage percentage. A countdown is time until a reported reset, not an allowance of working hours.
+
+A reading that returned data stays on screen with its age while a provider is slow, rate-limited, or briefly unreachable, labelled with why it is being held, and is retired after 15 minutes. Quota requests are paced per provider (Claude at most every two minutes automatically) and back off when a provider refuses; the title-bar refresh button still asks immediately.
 
 Missing values display as unavailable. A failed connection, missing quota field, or expired reading never becomes a zero-percent meter or a guessed countdown. Last-known Cursor snapshots carry their age and stale status.
 
@@ -27,9 +29,26 @@ Cursor dashboard endpoints are unofficial and may change. This project is indepe
 
 **Usage value is not necessarily money charged.** Cursor's cycle value can include included and bonus usage. Event-level `tokenUsage.totalCents` values may differ from the dashboard cycle total; they are separate reported metrics and must not be treated as reconciled billing. The app does not combine raw event values with `chargedCents` or infer model prices.
 
+Codex Sessions also shows an **estimated session cost in USD** for GPT-6 Astra using [published Standard API token rates](https://developers.openai.com/api/docs/models/gpt-6-astra), checked September 20, 2026. It prices recorded requests separately, discounts cached input, applies long-context rates, and ignores duplicate cumulative counters. This is API-equivalent token value, not money charged to a subscription. Fast mode, cache-write surcharges, tools, taxes, subscription fees, and separate subagent logs are excluded. Unsupported models and missing counts remain unavailable; model switches, counter gaps/resets, and unreadable history produce a partial estimate. The selected Codex log is streamed from the start (up to 64 MiB) with results cached by file size and modification time; no transcript content is returned.
+
 Event history is fetched beyond the first page until the reported count is reached, subject to bounded time and pagination limits. If retrieval is incomplete, the app labels that state and withholds event-derived totals. The report also records data sources, fetch time, and completeness.
 
 Codex and Claude may return different quota windows for different accounts. Only returned percentages and timestamps are displayed; subscription price does not determine a fixed number of working hours. If a provider cannot be read, its row explains that it is unavailable.
+
+## Follow the Claude Code session you are typing in
+
+Claude Code runs a status line for the session in front of you and hands it that session's own counters. Point it at `cli_statusline.py` and TOKENMAXXING follows that chat, including its live context size and Claude Code's own reported session cost. In `~/.claude/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "python C:/Users/you/github/TokenMaxxing/cli_statusline.py"
+  }
+}
+```
+
+The status line writes only a session id, model name, token counters, and reported cost to `~/.tokenmaxxing/claude-active.json` (override the folder with `TOKENMAXXING_HOME`). No prompt text, transcript content, file path, or keystroke is read or stored. Without it, Claude Code sessions still work through **Latest activity** and manual selection.
 
 ## Connect your accounts
 
@@ -70,7 +89,7 @@ start.bat          Windows
 
 The launcher installs Electron dependencies on first run. Alternatively, run `npm install` and `npm start` inside `app/`.
 
-The app refreshes data automatically. Use the title-bar refresh button to request a fresh account reading. In Sessions, **Open Codex chat** uses a read-only Windows accessibility helper that reads only the Codex document title, never transcript text or keyboard input. An unavailable title, duplicate title, cloud chat, or missing local record shows unavailable rather than a background task's usage. When several Codex windows are visible, the focused one is used; an ambiguous selection is unavailable. This depends on Codex's current accessibility layout; other platforms retain **Latest activity**. Choosing a session pins it; the follow button resumes the selected automatic mode. Up to 100 recent session files plus an explicitly matched older session are inspected using bounded log tails. Subagent logs are excluded. Missing token records do not become zero usage, and request usage is not presented as live context occupancy. Cursor selection skips chat headers with missing stored data.
+The app refreshes data automatically. Use the title-bar refresh button to request a fresh account reading. In Sessions, **Open Codex chat** uses a read-only Windows accessibility helper that reads only the Codex document title, never transcript text or keyboard input. An unavailable title, duplicate title, cloud chat, or missing local record shows unavailable rather than a background task's usage. When several Codex windows are visible, the focused one is used; an ambiguous selection is unavailable. This depends on Codex's current accessibility layout; other platforms retain **Latest activity**. Choosing a session pins it; the follow button resumes the selected automatic mode. Up to 100 recent session files are listed from their first record; only the selected session's log tail is read, and a log that has not changed is never re-read. An explicitly matched older session is included beyond the 100. Subagent logs are excluded. Missing token records do not become zero usage, and request usage is not presented as live context occupancy. Cursor selection skips chat headers with missing stored data.
 
 ## Local storage and credentials
 

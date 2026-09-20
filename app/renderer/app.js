@@ -161,10 +161,14 @@ function remainingTime(epoch) {
   return days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
+// A reading is shown with its age for as long as the engine holds it, so a
+// refused or slow poll no longer blanks a provider and fills it back in.
+const HOLD_SECONDS = 900;
+
 function providerCurrent(provider) {
   return provider && ['ok', 'available'].includes(provider.status) &&
     known(provider.fetched_at) && Date.now() / 1000 - provider.fetched_at >= 0 &&
-    Date.now() / 1000 - provider.fetched_at <= 180 && !provider.stale;
+    Date.now() / 1000 - provider.fetched_at <= HOLD_SECONDS && !provider.stale;
 }
 
 function windowCurrent(window) {
@@ -192,8 +196,8 @@ function providerBands() {
     bands.push({
       id, label, kind: 'pool', value: valid ? selected.used_percent : null,
       display: valid ? `${pct(selected.used_percent)} used` : 'Unavailable',
-      hint: valid ? `${selected.label} · ${resetText(selected.resets_at)}` : reason,
-      tip: valid ? `${provider.source} · checked ${relativeTime(provider.fetched_at)}. ` +
+      hint: valid ? `${selected.label} · ${resetText(selected.resets_at)}${provider.warning ? ' · holding last reading' : ''}` : reason,
+      tip: valid ? `${provider.source} · checked ${relativeTime(provider.fetched_at)}. ${provider.warning ? provider.warning + ' ' : ''}` +
         windows.map(w => `${w.label}: ${pct(w.used_percent)} used; ${resetText(w.resets_at)}`).join(' · ') : reason,
     });
   }
@@ -539,12 +543,18 @@ function renderChat() {
   cats.replaceChildren();
   billed.replaceChildren();
   $('chatTax').textContent = '—';
-  const followsOpen = state.sessionProvider === 'codex' && state.sessionFollow === 'active';
-  $('sessionFollowRow').hidden = state.sessionProvider !== 'codex' || !state.activeChatSupported;
+  $('sessionCostTitle').textContent = state.sessionProvider === 'cursor' ? 'Recorded usage value for this session'
+    : state.sessionProvider === 'claude' ? 'Reported session cost' : 'Estimated session cost';
+  $('sessionCostScope').textContent = state.sessionProvider === 'cursor' ? 'this cycle' : 'USD · session log';
+  const followProvider = state.sessionProvider === 'codex' ? state.activeChatSupported : state.sessionProvider === 'claude';
+  const followsOpen = followProvider && state.sessionFollow === 'active';
+  const openLabel = state.sessionProvider === 'claude' ? 'Open Claude Code session' : 'Open Codex chat';
+  $('sessionFollowRow').hidden = !followProvider;
+  $('sessionFollowOpen').textContent = openLabel;
   $('sessionMode').textContent = state.pinned ? 'Pinned session · stays on your selected chat.' : followsOpen
-    ? 'Following the open Codex chat · updates when you switch chats.'
+    ? `Following the ${state.sessionProvider === 'claude' ? 'open Claude Code session' : 'open Codex chat'} · updates when you switch chats.`
     : 'Latest activity · follows the most recently updated session, including background tasks.';
-  $('btnUnpin').textContent = followsOpen ? 'Follow open chat' : 'Latest activity';
+  $('btnUnpin').textContent = followsOpen ? openLabel : 'Latest activity';
   $('sessionBreakdownTitle').textContent = state.sessionProvider === 'cursor' ? 'Estimated context breakdown' : 'Recorded token usage';
 
   const picker = document.querySelector('.chat-picker');
@@ -593,7 +603,7 @@ function renderChat() {
     for (const [label,value] of metrics) cats.append(el('div',{class:'cat'},[
       el('span',{class:'cat-name',text:label}),el('span',{class:'cat-val',text:compact(value)})]));
     if (!metrics.length) cats.append(el('p',{class:'empty',text:'No token-usage record in the recent portion of this session log.'}));
-    billed.append(el('p',{class:'empty',text:'Per-session monetary usage is not reported here. Account quota percentages are in Overview.'}));
+    renderSessionCost(billed, chat.cost);
     return;
   }
   body.append(el('p',{class:'tile-note',text:`Session updated ${relativeTime(chat.updated_at)} · ${chat.measurement}`}));
@@ -654,6 +664,27 @@ function renderChat() {
       text: `${compact(match.out)} out · ${compact(match.cr)} cache read`,
     }));
   }
+}
+
+function renderSessionCost(container, cost) {
+  if (known(cost?.cents) && cost.reported) {
+    // A value the provider itself reports; nothing here is estimated.
+    container.append(el('div',{class:'tile-value',text:`≈ ${money(cost.cents, cost.cents < 100 ? 4 : 2)}`}));
+    container.append(el('p',{class:'tile-note',text:cost.basis}));
+    return;
+  }
+  if (!known(cost?.cents)) {
+    container.append(el('p',{class:'empty',text:'Cost unavailable: no recorded requests with supported model pricing and complete token counts.'}));
+    if (known(cost?.last_request_cents)) container.append(el('p',{class:'tile-note',text:`Last request estimate: ${money(cost.last_request_cents, 4)}`}));
+    return;
+  }
+  container.append(el('div',{class:'tile-value',text:`≈ ${money(cost.cents, cost.cents > 0 && cost.cents < 1 ? 4 : 2)}`}));
+  container.append(el('p',{class:'tile-note',text:cost.partial
+    ? `Partial estimate · ${cost.priced_requests} priced requests. Some usage could not be priced or read.`
+    : `${cost.priced_requests} recorded requests · API-equivalent estimate`}));
+  if (known(cost.last_request_cents)) container.append(el('p',{class:'tile-note',text:`Last request: ≈ ${money(cost.last_request_cents, 4)}`}));
+  container.append(el('p',{class:'tile-note',text:cost.basis}));
+  container.append(el('p',{class:'tile-note',text:`Pricing checked ${cost.pricing_date} · excludes separate subagent logs.`}));
 }
 
 // ── resets ────────────────────────────────────────────────────────────────
@@ -733,6 +764,7 @@ function renderResets() {
       card.append(el('div',{class:'connection-reason',text:reason.replace('Open Claude Code to reconnect.', 'Use Reconnect Claude below.')}));
     } else {
       card.append(el('div',{class:'tile-note',text:`Source: ${label} account usage`}));
+      if (provider.warning) card.append(el('div',{class:'tile-note',text:`${provider.warning} Showing the reading from ${relativeTime(provider.fetched_at)}.`}));
       for (const window of provider.windows) {
         const clock = el('div',{class:'clock'},[
           el('div',{},[
@@ -848,8 +880,9 @@ async function refreshProviders(force = false) {
     state.providers = await window.hud.call('providers',{force});
     state.providersError = null;
   } catch (err) {
+    // The previous snapshot stays on screen with its age; a failed call is
+    // reported, never painted as missing data.
     state.providersError = `Provider refresh failed: ${engineMessage(err)}`;
-    state.providers = null;
   } finally {
     state.providersFetching = false;
     renderResets();
@@ -944,8 +977,10 @@ async function boot() {
     if (typeof saved.pinned === 'string') state.pinned = saved.pinned;
     if (['active','latest'].includes(saved.follow)) state.sessionFollow = saved.follow;
   } catch { /* Invalid preference follows the open Codex chat. */ }
+  // Codex is followed through a Windows accessibility helper; Claude Code
+  // reports its own open session through the status line on any platform.
   state.activeChatSupported = platform === 'win32';
-  if (!state.activeChatSupported) state.sessionFollow = 'latest';
+  if (!state.activeChatSupported && state.sessionProvider === 'codex') state.sessionFollow = 'latest';
   $('sessionFollow').value = state.sessionFollow;
   $('sessionFollow').addEventListener('change', event => {
     state.sessionFollow = event.target.value;

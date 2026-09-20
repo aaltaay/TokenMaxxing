@@ -21,14 +21,26 @@ from datetime import datetime
 from urllib import error, request
 
 CACHE_SECONDS = 60
-STALE_SECONDS = 180
+# A reading is held and labelled with its age rather than blanked: quota
+# windows run for hours, so a few minutes old is still the truth on screen.
+STALE_SECONDS = 900
 FETCH_TIMEOUT = 20
+# Claude's usage endpoint rejects frequent polling, so requests to it are
+# spaced out and a refusal backs off instead of retrying every minute.
+MIN_INTERVAL = {"claude": 120.0, "codex": 30.0}
+RATE_LIMIT_BACKOFF = 300.0
+MAX_BACKOFF = 1800.0
 CODEX_SOURCE = "Codex account/rateLimits/read"
 CLAUDE_SOURCE = "Claude Code OAuth usage"
 _cache: dict | None = None
 _cache_time = 0.0
 _lock = threading.Lock()
 _fetch_lock = threading.Lock()
+# Last reading that actually returned windows, per provider, plus request
+# pacing state. Held readings keep their own fetched_at, so age stays honest.
+_last_good: dict = {}
+_attempted: dict = {}
+_backoff_until: dict = {}
 
 
 def _number(value):
@@ -56,7 +68,7 @@ def _timestamp(value):
     return None
 
 
-def _provider(provider_id, source, windows=None, reason=None, fetched_at=None):
+def _provider(provider_id, source, windows=None, reason=None, fetched_at=None, retry_after=None):
     result = {
         "id": provider_id,
         "label": "Codex" if provider_id == "codex" else "Claude",
@@ -67,6 +79,8 @@ def _provider(provider_id, source, windows=None, reason=None, fetched_at=None):
     }
     if reason:
         result["reason"] = reason
+    if retry_after:
+        result["retry_after"] = retry_after
     return result
 
 
@@ -270,7 +284,14 @@ def _read_claude():
         if exc.code in (401, 403):
             reason = "Claude did not authorize quota access. Check the existing Claude Code sign-in."
         elif exc.code == 429:
-            reason = "Claude temporarily limited quota requests."
+            retry = exc.headers.get("Retry-After") if exc.headers else None
+            try:
+                wait = max(60.0, min(MAX_BACKOFF, float(retry)))
+            except (TypeError, ValueError):
+                wait = RATE_LIMIT_BACKOFF
+            return _provider("claude", CLAUDE_SOURCE,
+                             reason=f"Claude limited quota requests. Retrying in {round(wait / 60)} min.",
+                             retry_after=wait)
         else:
             reason = f"Claude usage service returned HTTP {exc.code}."
     except (TimeoutError, error.URLError):
@@ -307,6 +328,48 @@ def peek_provider_usage():
         return _mark_stale(_cache)
 
 
+def _hold(provider_id, source, note):
+    """Show the last reading that returned data, labelled with why it is old."""
+    held = _last_good.get(provider_id)
+    if not held:
+        return _provider(provider_id, source, reason=note)
+    held = copy.deepcopy(held)
+    held["warning"] = note
+    return held
+
+
+def _fetch_one(provider_id, source, reader, force):
+    """One paced request: never hammer a provider that just refused us."""
+    now = time.monotonic()
+    until = _backoff_until.get(provider_id, 0.0)
+    if now < until:
+        return _hold(provider_id, source,
+                     f"{'Claude' if provider_id == 'claude' else 'Codex'} limited quota requests. "
+                     f"Retrying in {max(1, round((until - now) / 60))} min.")
+    # A refresh the person asked for always reaches the provider; only
+    # automatic polling is paced, and a refusal is honoured either way.
+    last = _attempted.get(provider_id)
+    spacing = 0.0 if force else MIN_INTERVAL.get(provider_id, 0.0)
+    if last is not None and now - last < spacing:
+        return _hold(provider_id, source, "Reusing the last reading; this provider limits how often "
+                                          "usage can be requested.")
+    _attempted[provider_id] = now
+    try:
+        result = reader()
+    except Exception:
+        result = _provider(provider_id, source, reason="Quota request failed.")
+    retry_after = result.pop("retry_after", None)
+    if retry_after:
+        _backoff_until[provider_id] = time.monotonic() + retry_after
+    if result.get("status") == "ok":
+        _backoff_until.pop(provider_id, None)
+        _last_good[provider_id] = result
+        return result
+    # A failed request never becomes zero usage, and never blanks a reading
+    # that was true minutes ago; staleness alone retires it.
+    return _hold(provider_id, source, result.get("reason") or "Quota request returned no data.")
+
+
 def get_provider_usage(force=False):
     """Fetch both services in parallel with a 20-second overall response bound.
 
@@ -321,22 +384,20 @@ def get_provider_usage(force=False):
             return _mark_stale(_cache)
     acquired = _fetch_lock.acquire(timeout=FETCH_TIMEOUT + 1) if force else _fetch_lock.acquire(blocking=False)
     if not acquired:
-        if force:
-            return {"fetched_at": None, "providers": [
-                _provider("codex", CODEX_SOURCE, reason="Usage refresh is still in progress. Try again."),
-                _provider("claude", CLAUDE_SOURCE, reason="Usage refresh is still in progress. Try again.")]}
+        # A refresh is already running; show what is on hand rather than
+        # replacing the dashboard with a progress message.
         return peek_provider_usage() or {
             "fetched_at": None, "providers": [
-                _provider("codex", CODEX_SOURCE, reason="Reading quota…"),
-                _provider("claude", CLAUDE_SOURCE, reason="Reading quota…")]}
+                _provider("codex", CODEX_SOURCE, reason="Reading quota\u2026"),
+                _provider("claude", CLAUDE_SOURCE, reason="Reading quota\u2026")]}
     try:
         results = queue.Queue()
 
         def fetch(provider_id, source, reader):
             try:
-                result = reader()
+                result = _fetch_one(provider_id, source, reader, force)
             except Exception:
-                result = _provider(provider_id, source, reason="Quota request failed.")
+                result = _hold(provider_id, source, "Quota request failed.")
             results.put(result)
 
         readers = (("codex", CODEX_SOURCE, _read_codex), ("claude", CLAUDE_SOURCE, _read_claude))
@@ -351,7 +412,7 @@ def get_provider_usage(force=False):
             except queue.Empty:
                 break
         snapshot = {"fetched_at": time.time(), "providers": [
-            providers.get(provider_id) or _provider(provider_id, source, reason="Quota request timed out.")
+            providers.get(provider_id) or _hold(provider_id, source, "Quota request timed out.")
             for provider_id, source, _ in readers]}
         with _lock:
             _cache, _cache_time = snapshot, time.monotonic()

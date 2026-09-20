@@ -97,7 +97,7 @@
         </div>
         <div class="row-actions" id="sessionFollowRow">
           <label for="sessionFollow">Follow</label>
-          <select class="select" id="sessionFollow"><option value="active">Open Codex chat</option><option value="latest">Latest activity</option></select>
+          <select class="select" id="sessionFollow"><option value="active" id="sessionFollowOpen">Open Codex chat</option><option value="latest">Latest activity</option></select>
         </div>
         <p class="tile-note" id="sessionMode">Following the open Codex chat.</p>
         <div class="chat-picker">
@@ -115,8 +115,8 @@
       </div>
 
       <div class="card">
-        <div class="card-head"><h2>Recorded usage value for this session</h2>
-          <span class="meta">this cycle</span>
+        <div class="card-head"><h2 id="sessionCostTitle">Recorded usage value for this session</h2>
+          <span class="meta" id="sessionCostScope">this cycle</span>
         </div>
         <div id="chatBilled"></div>
       </div>

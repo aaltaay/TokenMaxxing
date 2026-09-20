@@ -48,6 +48,18 @@ test('missing metrics remain unavailable while actual zero remains zero', () => 
   assert.equal(run('compact(0)'), '0');
 });
 
+test('session cost distinguishes estimates, partial history, zero and unavailable', () => {
+  const run = renderer();
+  run(`el = (tag, attrs) => attrs; const costRows = []; const costContainer = {append: row => costRows.push(row)};`);
+  run(`renderSessionCost(costContainer, {cents:33, priced_requests:2, partial:true, basis:'API value, not billed charges', pricing_date:'2026-09-20'})`);
+  assert.equal(run('costRows[0].text'), '≈ $0.33');
+  assert.match(run('costRows[1].text'), /Partial estimate/);
+  run(`costRows.length=0; renderSessionCost(costContainer, {cents:0, priced_requests:1})`);
+  assert.equal(run('costRows[0].text'), '≈ $0.00');
+  run(`costRows.length=0; renderSessionCost(costContainer, null)`);
+  assert.match(run('costRows[0].text'), /Cost unavailable/);
+});
+
 test('provider rings cannot be generated from reset countdowns', () => {
   const run = renderer();
   run(`state.resets={rows:[{provider:'codex',kind:'session',elapsed_pct:70,countdown:'4h'}]}`);
@@ -65,10 +77,28 @@ test('Codex weekly quota remains a consumption percentage', () => {
 
 test('expired or stale provider readings have no consumption arc', () => {
   const run = renderer();
-  run(`state.providers={providers:[{id:'codex',status:'ok',fetched_at:Date.now()/1000-181,windows:[{used_percent:5,window_minutes:10080}]}]}`);
+  run(`state.providers={providers:[{id:'codex',status:'ok',fetched_at:Date.now()/1000-HOLD_SECONDS-1,windows:[{used_percent:5,window_minutes:10080}]}]}`);
   assert.equal(run(`providerBands().find(p=>p.id==='codex').value`),null);
   run(`state.providers.providers[0].fetched_at=Date.now()/1000; state.providers.providers[0].windows[0].resets_at=Date.now()/1000-1`);
   assert.equal(run(`providerBands().find(p=>p.id==='codex').value`),null);
+});
+
+test('a held reading keeps its arc and says it is being held', () => {
+  const run = renderer();
+  run(`state.providers={providers:[{id:'claude',status:'ok',source:'test',warning:'Claude limited quota requests. Retrying in 5 min.',fetched_at:Date.now()/1000-240,windows:[{id:'five_hour',label:'5-hour',used_percent:64,window_minutes:300,resets_at:Date.now()/1000+3600}]}]}`);
+  assert.equal(run(`providerBands().find(p=>p.id==='claude').display`),'64% used');
+  assert.match(run(`providerBands().find(p=>p.id==='claude').hint`),/holding last reading/);
+  assert.match(run(`providerBands().find(p=>p.id==='claude').tip`),/Retrying in 5 min/);
+});
+
+test('a failed refresh keeps the previous snapshot on screen', async () => {
+  const run = renderer();
+  run(`state.providers={providers:[{id:'claude',status:'ok',source:'test',fetched_at:Date.now()/1000,windows:[{id:'five_hour',label:'5-hour',used_percent:64,window_minutes:300,resets_at:Date.now()/1000+3600}]}]}`);
+  run(`renderResets = () => {}; paintOverview = () => {};
+    window.hud.call=async()=>{throw new Error('engine busy')}`);
+  await run(`refreshProviders(true)`);
+  assert.equal(run(`state.providers.providers[0].windows[0].used_percent`),64);
+  assert.match(run(`state.providersError`),/Provider refresh failed/);
 });
 
 test('an expired session preserves each provider’s current weekly quota', () => {

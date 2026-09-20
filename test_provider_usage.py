@@ -186,6 +186,13 @@ class CacheTest(unittest.TestCase):
         self.cache_patch = patch.object(pu, "_cache", None)
         self.cache_patch.start()
         self.addCleanup(self.cache_patch.stop)
+        for name in ("_last_good", "_attempted", "_backoff_until"):
+            patcher = patch.object(pu, name, {})
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def ok_claude(self):
+        return pu.normalize_claude({"five_hour": {"utilization": 12, "resets_at": time.time() + 3600}})
 
     def ok(self):
         return pu.normalize_codex({"rateLimits": {"primary": {
@@ -307,15 +314,49 @@ class CacheTest(unittest.TestCase):
 
     @patch.object(pu, "_read_claude")
     @patch.object(pu, "_read_codex")
-    def test_errors_replace_success_and_do_not_leak_exception_details(self, codex, claude):
+    def test_failed_request_holds_last_reading_without_leaking_exception_details(self, codex, claude):
         codex.return_value, claude.return_value = self.ok(), self.unavailable()
-        pu.get_provider_usage(force=True)
+        first = pu.get_provider_usage(force=True)
         codex.side_effect = RuntimeError("sensitive-provider-details")
         result = pu.get_provider_usage(force=True)
         provider = result["providers"][0]
-        self.assertEqual(provider["status"], "unavailable")
-        self.assertEqual(provider["windows"], [])
+        # The reading that did return data stays on screen, labelled, instead
+        # of the dashboard blanking and refilling on every failed poll.
+        self.assertEqual(provider["status"], "ok")
+        self.assertEqual(provider["windows"], first["providers"][0]["windows"])
+        self.assertIn("warning", provider)
         self.assertNotIn("sensitive-provider-details", json.dumps(result))
+
+    @patch.object(pu, "_read_claude")
+    @patch.object(pu, "_read_codex")
+    def test_held_reading_goes_stale_and_never_becomes_zero_usage(self, codex, claude):
+        codex.return_value, claude.return_value = self.ok(), self.unavailable()
+        pu.get_provider_usage(force=True)
+        codex.return_value = pu._provider("codex", pu.CODEX_SOURCE, reason="Quota request failed.")
+        with patch.object(pu, "STALE_SECONDS", -1):
+            provider = pu.get_provider_usage(force=True)["providers"][0]
+        self.assertEqual(provider["status"], "stale")
+        self.assertTrue(all(w["used_percent"] for w in provider["windows"]))
+
+    @patch.object(pu, "_read_claude")
+    @patch.object(pu, "_read_codex")
+    def test_rate_limited_claude_backs_off_instead_of_polling_every_minute(self, codex, claude):
+        codex.return_value = self.ok()
+        claude.return_value = pu._provider("claude", pu.CLAUDE_SOURCE, reason="limited", retry_after=300)
+        pu.get_provider_usage(force=True)
+        pu.get_provider_usage(force=True)
+        self.assertEqual(claude.call_count, 1)
+        self.assertIn("Retrying in", pu.peek_provider_usage()["providers"][1]["reason"])
+
+    @patch.object(pu, "_read_claude")
+    @patch.object(pu, "_read_codex")
+    def test_automatic_polling_is_spaced_but_a_requested_refresh_is_not(self, codex, claude):
+        codex.return_value, claude.return_value = self.ok(), self.ok_claude()
+        pu.get_provider_usage(force=True)
+        pu.get_provider_usage(force=False)
+        self.assertEqual(claude.call_count, 1)
+        pu.get_provider_usage(force=True)
+        self.assertEqual(claude.call_count, 2)
 
     @patch.object(pu, "FETCH_TIMEOUT", 0.03)
     @patch.object(pu, "_read_claude")

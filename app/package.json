@@ -42,6 +42,10 @@
       {
         "from": "active-chat.ps1",
         "to": "active-chat.ps1"
+      },
+      {
+        "from": "../cli_statusline.py",
+        "to": "cli_statusline.py"
       }
     ],
     "win": {

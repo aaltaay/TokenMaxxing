@@ -67,6 +67,15 @@ const providerLinks = new ProviderLinkManager({
 });
 const watchedCredentials = [];
 
+// Claude Code rewrites its credential file often. Without this, every write
+// forced a fresh quota request and the provider row flickered.
+let credentialTimer = null;
+function credentialsChanged() {
+  if (credentialTimer) return;
+  credentialTimer = setTimeout(() => { credentialTimer = null; send('providers:changed', {}); }, 10000);
+  credentialTimer.unref?.();
+}
+
 function watchExistingConnections() {
   const home = app.getPath('home');
   const credentials = [
@@ -75,7 +84,7 @@ function watchExistingConnections() {
   ];
   for (const file of credentials) {
     const changed = (current, previous) => {
-      if (current.mtimeMs !== previous.mtimeMs) send('providers:changed', {});
+      if (current.mtimeMs !== previous.mtimeMs) credentialsChanged();
     };
     fs.watchFile(file, {interval: 2000, persistent: false}, changed);
     watchedCredentials.push([file, changed]);

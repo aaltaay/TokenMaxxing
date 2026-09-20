@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -40,6 +41,13 @@ class SessionsTest(unittest.TestCase):
             self.assertEqual(s.get_sessions('codex','old')['chat']['id'],'old')
             self.assertEqual(s.get_sessions('codex')['chat']['id'],'new')
             self.assertIsNone(s.get_sessions('codex','missing')['chat'])
+    def test_selected_codex_cost_is_attached_without_exposing_path(self):
+        rows=[{'id':'one','name':'One','_path':str(self.path)}]
+        with patch.object(s,'file_sessions',return_value=rows), patch.object(s,'codex_titles',return_value={}), patch.object(s.session_cost,'estimate_file',return_value={'cents':33}) as estimate:
+            result=s.get_sessions('codex','one')
+        self.assertEqual(result['chat']['cost']['cents'],33)
+        self.assertNotIn('_path',result['chat'])
+        estimate.assert_called_once_with(str(self.path))
     def test_open_chat_switches_without_any_log_writes(self):
         rows=[{'id':'background','name':'Background','used':999},
               {'id':'one','name':'One','used':100},{'id':'two','name':'Two','used':200}]
@@ -68,6 +76,48 @@ class SessionsTest(unittest.TestCase):
             sessions=s.file_sessions('codex','000')
         self.assertEqual(len(sessions),101)
         self.assertIn('000',[row['id'] for row in sessions])
+    def test_claude_follows_the_open_session_reported_by_the_status_line(self):
+        home=Path(self.tmp.name)/'hud';home.mkdir()
+        (home/'claude-active.json').write_text(json.dumps({'session_id':'two','at':time.time(),
+            'model':'Claude Opus','cost_usd':1.25,
+            'context_window':{'total_input_tokens':1000,'context_window_size':200000,'used_percentage':0.5}}),encoding='utf-8')
+        rows=[{'id':'one','name':'One','used':999},{'id':'two','name':'Two','used':5}]
+        with patch.dict(s.os.environ,{'TOKENMAXXING_HOME':str(home)}), patch.object(s,'file_sessions',return_value=rows):
+            result=s.get_sessions('claude',follow='active')
+            latest=s.get_sessions('claude',follow='latest')
+        self.assertEqual(result['chat']['id'],'two')
+        self.assertEqual(result['selection_mode'],'active')
+        self.assertEqual(result['chat']['limit'],200000)
+        self.assertEqual(result['chat']['used'],1000)
+        self.assertEqual(result['chat']['cost']['cents'],125)
+        self.assertEqual(latest['chat']['id'],'one')
+
+    def test_stale_or_missing_pointer_never_shows_a_background_session(self):
+        home=Path(self.tmp.name)/'hud2';home.mkdir()
+        rows=[{'id':'one','name':'One','used':999}]
+        with patch.dict(s.os.environ,{'TOKENMAXXING_HOME':str(home)}), patch.object(s,'file_sessions',return_value=rows):
+            self.assertIsNone(s.get_sessions('claude',follow='active')['chat'])
+            (home/'claude-active.json').write_text(json.dumps({'session_id':'one','at':time.time()-s.POINTER_MAX_AGE-1}),encoding='utf-8')
+            s._cache.clear()
+            self.assertIsNone(s.get_sessions('claude',follow='active')['chat'])
+
+    def test_unchanged_log_is_not_read_again_and_only_the_selection_is_detailed(self):
+        self.path.write_text(json.dumps({'type':'assistant','sessionId':'abc','cwd':'C:/work/p',
+            'message':{'model':'claude','usage':{'input_tokens':1,'cache_read_input_tokens':2,
+            'cache_creation_input_tokens':3,'output_tokens':4}}})+'\n',encoding='utf-8')
+        root=Path(self.tmp.name)/'projects'/'p';root.mkdir(parents=True)
+        target=root/'abc.jsonl';target.write_bytes(self.path.read_bytes())
+        s._parsed.clear()
+        with patch.dict(s.os.environ,{'CLAUDE_CONFIG_DIR':self.tmp.name}), patch.object(s,'parse_session',wraps=s.parse_session) as parse:
+            first=s.get_sessions('claude')
+            s._cache.clear()
+            second=s.get_sessions('claude')
+        self.assertEqual(first['chat']['used'],6)
+        self.assertEqual(second['chat']['used'],6)
+        # One head read for the list, one tail read for the selection; the
+        # second poll re-reads nothing because the log did not change.
+        self.assertEqual(parse.call_count,2)
+
     def test_cursor_skips_missing_stale_selection_and_uses_valid_records(self):
         db=Path(self.tmp.name)/'cursor.db'
         con=sqlite3.connect(db)
