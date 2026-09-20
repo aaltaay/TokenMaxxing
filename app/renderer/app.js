@@ -28,10 +28,14 @@ const state = {
   providersRefreshPending: false,
   links: {},
   pinned: null,
-  sessionProvider: 'codex',
+  sessionProvider: 'auto',
   sessionFollow: 'active',
   activeChatSupported: true,
   localFetching: false,
+  // Auto mode's own findings: which of Codex/Claude it last saw open, and
+  // whether that is still true as of the latest poll.
+  autoDetected: null,
+  autoActive: false,
   focus: null,
   view: 'overview',
 };
@@ -533,29 +537,40 @@ function saveSessionChoice() {
   catch { /* Persistence is optional; current selection remains active. */ }
 }
 
+// Auto mode never queries the engine with 'auto' itself — it resolves to
+// whichever of Codex/Claude was last seen open, defaulting to Codex only
+// for display purposes before the first detection lands.
+function effectiveProvider() {
+  return state.sessionProvider === 'auto' ? (state.autoDetected || 'codex') : state.sessionProvider;
+}
+
 function renderChat() {
   const local = state.local;
   const select = $('chatSelect');
   const body = $('chatBody');
   const cats = $('chatCats');
   const billed = $('chatBilled');
+  const provider = effectiveProvider();
+  const isAuto = state.sessionProvider === 'auto';
   body.replaceChildren();
   cats.replaceChildren();
   billed.replaceChildren();
   $('chatTax').textContent = '—';
-  $('sessionCostTitle').textContent = state.sessionProvider === 'cursor' ? 'Recorded usage value for this session'
-    : state.sessionProvider === 'claude' ? 'Reported session cost' : 'Estimated session cost';
-  $('sessionCostScope').textContent = state.sessionProvider === 'cursor' ? 'this cycle' : 'USD · session log';
-  const followProvider = state.sessionProvider === 'codex' ? state.activeChatSupported : state.sessionProvider === 'claude';
-  const followsOpen = followProvider && state.sessionFollow === 'active';
-  const openLabel = state.sessionProvider === 'claude' ? 'Open Claude Code session' : 'Open Codex chat';
-  $('sessionFollowRow').hidden = !followProvider;
+  $('sessionCostTitle').textContent = provider === 'cursor' ? 'Recorded usage value for this session'
+    : provider === 'claude' ? 'Reported session cost' : 'Estimated session cost';
+  $('sessionCostScope').textContent = provider === 'cursor' ? 'this cycle' : 'USD · session log';
+  const followProvider = provider === 'codex' ? state.activeChatSupported : provider === 'claude';
+  const followsOpen = isAuto ? state.autoActive : (followProvider && state.sessionFollow === 'active');
+  const openLabel = provider === 'claude' ? 'Open Claude Code session' : 'Open Codex chat';
+  $('sessionFollowRow').hidden = isAuto || !followProvider;
   $('sessionFollowOpen').textContent = openLabel;
-  $('sessionMode').textContent = state.pinned ? 'Pinned session · stays on your selected chat.' : followsOpen
-    ? `Following the ${state.sessionProvider === 'claude' ? 'open Claude Code session' : 'open Codex chat'} · updates when you switch chats.`
+  $('sessionMode').textContent = state.pinned ? 'Pinned session · stays on your selected chat.'
+    : isAuto ? (state.autoActive ? `Auto · following the ${provider === 'claude' ? 'open Claude Code session' : 'open Codex chat'}.`
+                                  : 'Auto · no open Codex or Claude Code chat detected right now.')
+    : followsOpen ? `Following the ${provider === 'claude' ? 'open Claude Code session' : 'open Codex chat'} · updates when you switch chats.`
     : 'Latest activity · follows the most recently updated session, including background tasks.';
   $('btnUnpin').textContent = followsOpen ? openLabel : 'Latest activity';
-  $('sessionBreakdownTitle').textContent = state.sessionProvider === 'cursor' ? 'Estimated context breakdown' : 'Recorded token usage';
+  $('sessionBreakdownTitle').textContent = provider === 'cursor' ? 'Estimated context breakdown' : 'Recorded token usage';
 
   const picker = document.querySelector('.chat-picker');
   if (!local?.available) {
@@ -573,7 +588,7 @@ function renderChat() {
 
   // Chat picker — rebuilt only when the list actually changes, so the open
   // dropdown does not slam shut on every poll.
-  const signature = state.sessionProvider + JSON.stringify(local.chats || []);
+  const signature = provider + JSON.stringify(local.chats || []);
   if (select.dataset.signature !== signature) {
     select.dataset.signature = signature;
     select.replaceChildren(...(local.chats || []).map((c) => el('option', { value: c.id, text: c.name })));
@@ -593,7 +608,7 @@ function renderChat() {
   }
 
   $('chatModel').textContent = chat.model || '—';
-  if (state.sessionProvider !== 'cursor') {
+  if (provider !== 'cursor') {
     body.append(el('div', {class:'tile-value',text:known(chat.used) ? `${compact(chat.used)} input tokens` : 'Usage unavailable'}));
     body.append(el('p', {class:'tile-note',text:chat.measurement}));
     const usageTime = chat.usage_at ? Date.parse(chat.usage_at)/1000 : null;
@@ -894,24 +909,56 @@ async function refreshProviders(force = false) {
   }
 }
 
+// Auto mode asks Codex and Claude in parallel whether either currently has
+// an open chat (the same 'active' lookup each provider already supports),
+// and follows whichever answers yes. Codex and Claude cannot both be the
+// chat in front of you, but if a stale answer briefly makes it look that
+// way, the provider already being followed wins rather than flip-flopping.
+async function detectAutoProvider() {
+  const jobs = [window.hud.call('sessions', {provider: 'claude', pinned: null, follow: 'active'})
+    .then(r => ['claude', r]).catch(() => ['claude', null])];
+  if (state.activeChatSupported) jobs.push(window.hud.call('sessions', {provider: 'codex', pinned: null, follow: 'active'})
+    .then(r => ['codex', r]).catch(() => ['codex', null]));
+  const found = (await Promise.all(jobs)).filter(([, r]) => r?.chat);
+  return found.find(([id]) => id === state.autoDetected) || found[0] || null;
+}
+
 async function refreshLocal() {
   if (state.localFetching) return;
   const provider = state.sessionProvider;
   const pinned = state.pinned;
   const follow = state.sessionFollow;
+  const stillCurrent = () => provider === state.sessionProvider && pinned === state.pinned && follow === state.sessionFollow;
   state.localFetching = true;
   try {
+    if (provider === 'auto') {
+      const pick = await detectAutoProvider();
+      if (!stillCurrent()) return;
+      if (pick) {
+        state.autoDetected = pick[0];
+        state.autoActive = true;
+        state.local = pick[1];
+      } else {
+        state.autoActive = false;
+        // Nothing open right now: keep whatever was last shown rather than
+        // blanking it, same as the provider quota tiles hold a stale reading.
+        if (!state.local) state.local = {available: true, chat: null,
+          reason: 'No open Codex or Claude Code chat detected yet. Open one, or pick a provider above.'};
+      }
+      renderChat();
+      return;
+    }
     const result = await window.hud.call('sessions', {provider, pinned, follow});
-    if (provider !== state.sessionProvider || pinned !== state.pinned || follow !== state.sessionFollow) return;
+    if (!stillCurrent()) return;
     state.local = result;
     renderChat();
   } catch (err) {
-    if (provider !== state.sessionProvider || pinned !== state.pinned || follow !== state.sessionFollow) return;
+    if (!stillCurrent()) return;
     state.local = {available:false,reason:`Local read failed: ${engineMessage(err)}`};
     renderChat();
   } finally {
     state.localFetching = false;
-    if (provider !== state.sessionProvider || pinned !== state.pinned || follow !== state.sessionFollow) refreshLocal();
+    if (!stillCurrent()) refreshLocal();
   }
 }
 
@@ -958,6 +1005,9 @@ async function boot() {
     $('btnPin').setAttribute('aria-pressed', String(applied));
   });
   $('chatSelect').addEventListener('change', (e) => {
+    // Picking a specific chat is itself an override: it locks Auto onto
+    // whichever provider it just found, so the pin means what it says.
+    if (state.sessionProvider === 'auto') state.sessionProvider = effectiveProvider();
     state.pinned = e.target.value;
     state.local = {available:false,reason:'Loading selected session…'};
     renderChat();
@@ -973,10 +1023,10 @@ async function boot() {
   });
   try {
     const saved = JSON.parse(localStorage.getItem('sessionChoice') || '{}');
-    if (['codex','claude','cursor'].includes(saved.provider)) state.sessionProvider = saved.provider;
+    if (['auto','codex','claude','cursor'].includes(saved.provider)) state.sessionProvider = saved.provider;
     if (typeof saved.pinned === 'string') state.pinned = saved.pinned;
     if (['active','latest'].includes(saved.follow)) state.sessionFollow = saved.follow;
-  } catch { /* Invalid preference follows the open Codex chat. */ }
+  } catch { /* Invalid preference falls back to Auto. */ }
   // Codex is followed through a Windows accessibility helper; Claude Code
   // reports its own open session through the status line on any platform.
   state.activeChatSupported = platform === 'win32';
@@ -995,6 +1045,8 @@ async function boot() {
     state.sessionProvider = event.target.value;
     state.pinned = null;
     state.local = null;
+    state.autoDetected = null;
+    state.autoActive = false;
     saveSessionChoice();
     renderChat();
     refreshLocal();

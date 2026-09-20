@@ -23,6 +23,7 @@ test('changing follow mode while a read is pending discards the old selection', 
       sessionCalls.push(args);
       return new Promise(resolve => sessionReplies.push(resolve));
     };
+    state.sessionProvider='claude';
     state.sessionFollow='latest';
     const pendingSession = refreshLocal();
     state.sessionFollow='active';
@@ -36,6 +37,58 @@ test('changing follow mode while a read is pending discards the old selection', 
   run(`sessionReplies.shift()({chat:{id:'open',used:123}})`);
   await run('Promise.resolve()');
   assert.equal(run('state.local.chat.id'),'open');
+});
+
+test('auto mode follows whichever of Codex or Claude actually has an open chat', async () => {
+  const run = renderer();
+  run(`
+    renderChat = () => {};
+    state.activeChatSupported = true;
+    window.hud.call = async (cmd, args) => args.provider === 'claude'
+      ? {chat: {id: 'claude-one', used: 10}}
+      : {chat: null, reason: 'Open Codex chat could not be detected.'};
+  `);
+  await run('refreshLocal()');
+  assert.equal(run('state.autoDetected'), 'claude');
+  assert.equal(run('state.autoActive'), true);
+  assert.equal(run('state.local.chat.id'), 'claude-one');
+  assert.equal(run('effectiveProvider()'), 'claude');
+});
+
+test('auto mode holds the last detected chat instead of blanking when nothing is open', async () => {
+  const run = renderer();
+  run(`
+    renderChat = () => {};
+    state.activeChatSupported = false;
+    state.autoDetected = 'claude';
+    state.local = {chat: {id: 'claude-one', used: 10}};
+    window.hud.call = async () => ({chat: null, reason: 'not open'});
+  `);
+  await run('refreshLocal()');
+  assert.equal(run('state.autoActive'), false);
+  // Nothing currently open, but the previous chat stays on screen rather
+  // than being replaced by an empty state.
+  assert.equal(run('state.local.chat.id'), 'claude-one');
+});
+
+test('auto mode does not call Codex detection on platforms without the accessibility helper', async () => {
+  const run = renderer();
+  run(`
+    renderChat = () => {};
+    state.activeChatSupported = false;
+    const calls = [];
+    window.hud.call = async (cmd, args) => { calls.push(args.provider); return {chat: null}; };
+  `);
+  await run('refreshLocal()');
+  assert.equal(run('calls.length'), 1);
+  assert.equal(run('calls[0]'), 'claude');
+});
+
+test('picking a chat while in Auto locks the provider so the pin is unambiguous', () => {
+  const run = renderer();
+  run(`state.sessionProvider = 'auto'; state.autoDetected = 'claude';`);
+  run(`if (state.sessionProvider === 'auto') state.sessionProvider = effectiveProvider();`);
+  assert.equal(run('state.sessionProvider'), 'claude');
 });
 
 test('missing metrics remain unavailable while actual zero remains zero', () => {
