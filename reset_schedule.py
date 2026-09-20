@@ -55,7 +55,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "Claude and Codex/ChatGPT provider resets -- NOT Cursor Other-Models cycle %. "
         "Times use America/New_York. Weekly weekday + time are placeholders: paste the "
         "real values from Settings -> Usage. session_anchor is ISO-8601 (or click "
-        "Mark session started now in the HUD)."
+        "I just reset in the HUD)."
     ),
     "pre_warn_minutes": 2,
     "pre_warn_enabled": True,
