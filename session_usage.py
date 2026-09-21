@@ -25,6 +25,12 @@ _cache = {}
 # re-read, so a two-second poll costs one parse of the log being written.
 _parsed = {}
 _parsed_lock = threading.Lock()
+# Listed sessions get their totals (value, requests, model) from a full read
+# of each log. That runs on one background thread, so the list appears at
+# once and fills in; an unchanged log is summed once.
+SUMMARY_LIMIT = 24
+_pending = set()
+_pending_lock = threading.Lock()
 
 
 def numeric(value):
@@ -235,6 +241,43 @@ def cursor_sessions():
     finally: con.close()
 
 
+def _summarize(jobs):
+    for path, provider in jobs:
+        try:
+            session_cost.summarize_file(path, provider)
+        except (OSError, ValueError, TypeError):
+            pass
+        finally:
+            with _pending_lock:
+                _pending.discard((path, provider))
+
+
+def _summarize_later(jobs):
+    with _pending_lock:
+        jobs = [job for job in jobs if job not in _pending]
+        _pending.update(jobs)
+    if jobs:
+        threading.Thread(target=_summarize, args=(jobs,), daemon=True, name='session-totals').start()
+
+
+def _chat_rows(provider, sessions):
+    """The session list: identity, recency and, once known, each log's totals."""
+    rows, missing = [], []
+    for index, session in enumerate(sessions):
+        row = {'id': session['id'], 'name': session['name'], 'updated_at': session.get('updated_at')}
+        path = session.get('_path')
+        if provider in ('codex', 'claude') and path and index < SUMMARY_LIMIT:
+            summary = session_cost.cached_summary(path, provider)
+            if summary is None:
+                missing.append((path, provider))
+            else:
+                row.update(cents=summary['cents'], requests=summary['priced_requests'],
+                           model=summary['model'], partial=summary['partial'])
+        rows.append(row)
+    _summarize_later(missing)
+    return rows
+
+
 def _detail(provider, selected):
     """Full read of the one selected log, with its recorded usage and cost."""
     path = selected.pop('_path', None)
@@ -277,8 +320,14 @@ def _claude_live(selected, pointer):
             ('Output tokens this session', 'total_output_tokens')]}
     cost = numeric(pointer.get('cost_usd'))
     if cost is not None:
+        # The total is Claude Code's own; the per-request detail stays the
+        # log estimate, since the status line reports no breakdown.
+        estimate = selected.get('cost') or {}
         selected['cost'] = {'cents': cost * 100, 'reported': True, 'partial': False,
-                            'priced_requests': None, 'last_request_cents': None, 'pricing_date': None,
+                            'priced_requests': estimate.get('priced_requests'),
+                            'last_request_cents': estimate.get('last_request_cents'), 'pricing_date': None,
+                            'series': estimate.get('series') or [], 'series_start': estimate.get('series_start', 0),
+                            'top_requests': estimate.get('top_requests') or [],
                             'basis': 'Reported by Claude Code for this session. API-equivalent value, '
                                      'not a charge against a subscription.'}
     selected['model'] = pointer.get('model') or selected.get('model')
@@ -329,5 +378,5 @@ def get_sessions(provider='codex', pinned=None, follow='latest', active_title=No
     return {'available':True, 'provider':provider, 'pinned':pinned,
             'selection_mode': 'pinned' if pinned else 'active' if active else 'latest',
             'follow_source': follow_source,
-            'chats':[{'id':s['id'],'name':s['name']} for s in sessions], 'chat':dict(selected) if selected else None,
+            'chats':_chat_rows(provider, sessions), 'chat':dict(selected) if selected else None,
             'reason':reason}

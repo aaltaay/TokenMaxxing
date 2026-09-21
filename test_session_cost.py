@@ -121,5 +121,66 @@ class ClaudeSessionCostTests(unittest.TestCase):
             self.assertIsNone(c.estimate_file(path, 'codex')['cents'])
 
 
+def at(minute):
+    return f'2026-09-20T10:{minute:02d}:00Z'
+
+
+class RequestDetailTests(unittest.TestCase):
+    def test_priciest_requests_explain_themselves_with_their_parts_gap_and_rebuild(self):
+        cached = {'input_tokens': 5, 'cache_read_input_tokens': 200_000, 'cache_creation_input_tokens': 1_000, 'output_tokens': 500}
+        rebuild = {'input_tokens': 5, 'cache_read_input_tokens': 0, 'cache_creation_input_tokens': 201_000, 'output_tokens': 500,
+                   'cache_creation': {'ephemeral_1h_input_tokens': 201_000}}
+        records = [claude('claude-opus-5', cached, request='a', timestamp=at(0)),
+                   claude('claude-opus-5', cached, request='b', timestamp=at(1)),
+                   claude('claude-opus-5', rebuild, request='c', timestamp=at(59)),
+                   claude('claude-sonnet-5', cached, request='d', timestamp=at(59))]
+        result = c.estimate_records_for('claude', records)
+        self.assertEqual([row[2] for row in result['series']], [0, 0, 1, 0])
+        self.assertEqual(result['series'][2][3], 201_005)
+        top = result['top_requests']
+        self.assertEqual([t['index'] for t in top], [2, 0, 1, 3])
+        priciest = top[0]
+        self.assertTrue(priciest['rebuild'])
+        self.assertEqual(priciest['gap'], 58 * 60)
+        self.assertEqual(priciest['previous_model'], 'claude-opus-5')
+        self.assertEqual([p[0] for p in priciest['parts']], ['Uncached input', 'Cache write (1-hour)', 'Output'])
+        self.assertAlmostEqual(sum(p[2] for p in priciest['parts']), priciest['cents'])
+        self.assertEqual(top[-1]['previous_model'], 'claude-opus-5')
+        self.assertEqual(result['model'], 'claude-sonnet-5')
+
+    def test_the_first_request_is_never_called_a_rebuild(self):
+        fresh = {'input_tokens': 50_000, 'output_tokens': 10}
+        result = c.estimate_records_for('claude', [claude('claude-opus-5', fresh, timestamp=at(0))])
+        self.assertEqual(result['series'][0][2], 0)
+        self.assertIsNone(result['top_requests'][0]['gap'])
+
+    def test_codex_parts_follow_the_long_context_rate(self):
+        big = usage(300_000, 200_000, 1000)
+        record = dict(event(big), timestamp=at(0))
+        result = c.estimate_records([MODEL, record])
+        detail = result['top_requests'][0]
+        self.assertTrue(detail['long_context'])
+        self.assertEqual([p[0] for p in detail['parts']], ['Uncached input', 'Cached input', 'Output'])
+        self.assertAlmostEqual(detail['cents'], 247.5)
+        self.assertEqual(result['series'][0][3], 300_000)
+
+    def test_listed_logs_get_totals_without_evicting_the_open_estimate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'log.jsonl'
+            path.write_text(json.dumps(claude('claude-haiku-4-5', {'input_tokens': 1_000_000, 'output_tokens': 0})) + '\n', encoding='utf-8')
+            self.assertIsNone(c.cached_summary(path, 'claude'))
+            c._cache.clear()
+            summary = c.summarize_file(path, 'claude')
+            self.assertAlmostEqual(summary['cents'], 100)
+            self.assertEqual(summary['priced_requests'], 1)
+            self.assertEqual(c._cache, {})
+            self.assertEqual(c.cached_summary(path, 'claude')['model'], 'claude-haiku-4-5')
+            with path.open('a', encoding='utf-8') as stream:
+                stream.write(json.dumps(claude('claude-haiku-4-5', {'input_tokens': 1_000_000, 'output_tokens': 0}, request='req-2')) + '\n')
+            self.assertIsNone(c.cached_summary(path, 'claude'))
+            self.assertEqual(c.estimate_file(path, 'claude')['priced_requests'], 2)
+            self.assertEqual(c.cached_summary(path, 'claude')['priced_requests'], 2)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -167,6 +167,16 @@ class SessionsTest(unittest.TestCase):
         # second poll re-reads nothing because the log did not change.
         self.assertEqual(parse.call_count,2)
 
+    def test_listed_sessions_show_known_totals_and_queue_the_rest(self):
+        rows=[{'id':'a','name':'A','updated_at':1,'_path':'a.jsonl'},{'id':'b','name':'B','updated_at':2,'_path':'b.jsonl'}]
+        known={'cents':150,'priced_requests':3,'model':'claude-opus-5','partial':False}
+        with patch.object(s.session_cost,'cached_summary',side_effect=lambda path,provider: known if path=='a.jsonl' else None), \
+             patch.object(s,'_summarize_later') as later:
+            listed=s._chat_rows('claude',rows)
+        self.assertEqual(listed[0],{'id':'a','name':'A','updated_at':1,'cents':150,'requests':3,'model':'claude-opus-5','partial':False})
+        self.assertEqual(listed[1],{'id':'b','name':'B','updated_at':2})
+        later.assert_called_once_with([('b.jsonl','claude')])
+
     def test_cursor_skips_missing_stale_selection_and_uses_valid_records(self):
         db=Path(self.tmp.name)/'cursor.db'
         con=sqlite3.connect(db)
