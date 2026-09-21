@@ -87,57 +87,40 @@
     <!-- ── This chat ─────────────────────────────────────────────────── -->
     <section class="view" id="view-chat" role="tabpanel" aria-labelledby="tab-chat">
 
-      <div class="card">
-        <div class="card-head">
-          <h2>Session usage</h2>
-          <span class="meta" id="chatModel">—</span>
+      <div class="sess-controls">
+        <div class="filter-chips" id="sessionProviders" role="radiogroup" aria-label="Provider">
+          <button type="button" class="filter-chip" role="radio" aria-checked="true" data-provider="auto">Auto</button>
+          <button type="button" class="filter-chip" role="radio" aria-checked="false" data-provider="claude">Claude Code</button>
+          <button type="button" class="filter-chip" role="radio" aria-checked="false" data-provider="codex">Codex</button>
+          <button type="button" class="filter-chip" role="radio" aria-checked="false" data-provider="cursor">Cursor</button>
         </div>
-        <div class="row-actions">
-          <label for="sessionProvider">Provider</label>
-          <select class="select" id="sessionProvider"><option value="auto">Auto (whatever you're in)</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="cursor">Cursor</option></select>
+        <div class="filter-chips is-quiet" id="sessionFollowRow" role="radiogroup" aria-label="Follow">
+          <button type="button" class="filter-chip" role="radio" aria-checked="true" data-follow="active" id="sessionFollowOpen">Open chat</button>
+          <button type="button" class="filter-chip" role="radio" aria-checked="false" data-follow="latest">Latest activity</button>
         </div>
-        <div class="row-actions" id="sessionFollowRow">
-          <label for="sessionFollow">Follow</label>
-          <select class="select" id="sessionFollow"><option value="active" id="sessionFollowOpen">Open Codex chat</option><option value="latest">Latest activity</option></select>
-        </div>
-        <p class="tile-note" id="sessionMode">Following the open Codex chat.</p>
-        <div class="chat-picker">
-          <select class="select" id="chatSelect" aria-label="Chat to follow"></select>
-          <button class="chip" id="btnUnpin">Follow open chat</button>
-        </div>
-        <div id="chatBody"></div>
       </div>
-
-      <div class="card">
-        <div class="card-head"><h2 id="sessionBreakdownTitle">Recorded token usage</h2>
-          <span class="meta" id="chatTax">—</span>
-        </div>
-        <div class="cat-rows" id="chatCats"></div>
+      <div class="sess-mode">
+        <i class="sess-mode-dot" id="sessionModeDot"></i>
+        <span id="sessionMode">Finding your session…</span>
+        <button class="chip" id="btnUnpin" hidden>Follow open chat</button>
       </div>
-
-      <div class="card">
-        <div class="card-head"><h2 id="sessionCostTitle">Recorded usage value for this session</h2>
-          <span class="meta" id="sessionCostScope">this cycle</span>
-        </div>
-        <div id="chatBilled"></div>
-      </div>
+      <article class="card sess-list" id="sessionList"></article>
 
     </section>
 
     <!-- ── Resets ────────────────────────────────────────────────────── -->
     <section class="view" id="view-resets" role="tabpanel" aria-labelledby="tab-resets">
-      <div class="card">
-        <div class="card-head">
-          <h2>Provider windows</h2>
-          <span class="meta" id="resetsNow">—</span>
+      <div class="resets-intro">
+        <div class="resets-legend">
+          <span><i class="sw sw-used"></i>Used</span>
+          <span><i class="sw sw-even"></i>Even pace</span>
+          <span><i class="sw sw-over"></i>Past even pace</span>
+          <span class="resets-now" id="resetsNow">—</span>
         </div>
-        <p class="tile-note flush">
-          Usage percentages and reset times returned by each provider. Missing data is shown as unavailable.
-          The tick on each bar is where usage would sit if it were spread evenly until the reset; the pace line says
-          whether the current rate runs out first and what rate would last.
-        </p>
+        <p class="resets-hint">Even pace is where usage would sit if it were spread evenly until the reset.
+          Open a card to see when the current rate runs out.</p>
       </div>
-      <div id="resetCards"></div>
+      <div id="resetCards" class="prov-list"></div>
       <div class="card">
         <div class="card-head"><h2>Reset alerts</h2></div>
         <div class="row-actions flush">

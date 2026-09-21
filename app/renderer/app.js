@@ -38,6 +38,14 @@ const state = {
   autoActive: false,
   focus: null,
   view: 'overview',
+  // Limits cards the user has opened, kept across the clock re-renders.
+  openWindows: new Set(),
+  // Sessions list: whether the followed session is open, which of its
+  // priciest requests is broken down, and how many rows are shown.
+  sessionOpen: true,
+  sessionRequest: null,
+  sessionFor: null,
+  sessionRows: 6,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -105,8 +113,10 @@ function icon(paths, size = 18) {
 const ICONS = {
   alert: ['M12 8v5', 'M12 17h.01', 'M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z'],
   check: ['M20 6 9 17l-5-5'],
+  chevron: ['m6 9 6 6 6-6'],
   clock: ['M12 6v6l4 2', 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z'],
   plus: ['M12 5v14', 'M5 12h14'],
+  refresh: ['M21 12a9 9 0 1 1-2.6-6.4', 'M21 3v6h-6'],
   spark: ['M12 2.6 14.3 9 20.9 11.3 14.3 13.6 12 20.1 9.7 13.6 3.1 11.3 9.7 9z'],
 };
 
@@ -217,12 +227,17 @@ const PACE_SEVERITY = { fast: 'now', ahead: 'soon', exhausted: 'now', spare: 'ok
 const PACE_BADGE = { fast: 'Too fast', ahead: 'Ahead of pace', exhausted: 'Limit reached', spare: 'Spare quota', 'on-pace': 'On pace', early: 'Just started' };
 
 /** A rate in % per hour, shown per day for windows of a day or more. */
-function rateText(perHour, total) {
-  if (!known(perHour)) return '—';
+function rateParts(perHour, total) {
+  if (!known(perHour)) return null;
   const perDay = total >= 86400;
   const value = perDay ? perHour * 24 : perHour;
   const digits = value >= 10 ? 0 : value >= 1 ? 1 : 2;
-  return `${value.toFixed(digits)}% / ${perDay ? 'day' : 'hour'}`;
+  return { value: value.toFixed(digits), unit: perDay ? 'day' : 'hr' };
+}
+
+function rateText(perHour, total) {
+  const rate = rateParts(perHour, total);
+  return rate ? `${rate.value}% / ${rate.unit === 'hr' ? 'hour' : 'day'}` : '—';
 }
 
 function paceSentence(p) {
@@ -675,165 +690,518 @@ function effectiveProvider() {
   return state.sessionProvider === 'auto' ? (state.autoDetected || 'codex') : state.sessionProvider;
 }
 
-function renderChat() {
-  const local = state.local;
-  const select = $('chatSelect');
-  const body = $('chatBody');
-  const cats = $('chatCats');
-  const billed = $('chatBilled');
-  const provider = effectiveProvider();
-  const isAuto = state.sessionProvider === 'auto';
-  body.replaceChildren();
-  cats.replaceChildren();
-  billed.replaceChildren();
-  $('chatTax').textContent = '—';
-  $('sessionCostTitle').textContent = provider === 'cursor' ? 'Recorded usage value for this session'
-    : local?.chat?.cost?.reported ? 'Reported session cost' : 'Estimated session cost';
-  $('sessionCostScope').textContent = provider === 'cursor' ? 'this cycle' : 'USD · session log';
-  const followProvider = provider === 'codex' ? state.activeChatSupported : provider === 'claude';
-  const followsOpen = isAuto ? state.autoActive : (followProvider && state.sessionFollow === 'active');
-  const openLabel = provider === 'claude' ? 'Open Claude Code session' : 'Open Codex chat';
-  $('sessionFollowRow').hidden = isAuto || !followProvider;
-  $('sessionFollowOpen').textContent = openLabel;
-  // A Claude session found through its log rather than the status line is
-  // said so: it is the chat being written to, not a chat seen on screen.
-  const claudeOpen = local?.follow_source === 'recent log' ? 'Claude Code session active in the last 15 minutes' : 'open Claude Code session';
-  $('sessionMode').textContent = state.pinned ? 'Pinned session · stays on your selected chat.'
-    : isAuto ? (state.autoActive ? `Auto · following the ${provider === 'claude' ? claudeOpen : 'open Codex chat'}.`
-                                  : 'Auto · no open Codex or Claude Code chat detected right now.')
-    : followsOpen ? `Following the ${provider === 'claude' ? claudeOpen : 'open Codex chat'} · updates when you switch chats.`
-    : 'Latest activity · follows the most recently updated session, including background tasks.';
-  $('btnUnpin').textContent = followsOpen ? openLabel : 'Latest activity';
-  $('sessionBreakdownTitle').textContent = provider === 'cursor' ? 'Estimated context breakdown' : 'Recorded token usage';
+// Recent sessions as a Material 3 list. The one being followed opens into
+// its cost story: a bar per request, the priciest requests, and for each of
+// those where the money went and why. Every figure is read from the session
+// log and priced by the engine; the explanations only restate what the
+// log records (token classes, the gap before a request, a model change).
 
-  const picker = document.querySelector('.chat-picker');
-  if (!local?.available) {
-    $('chatModel').textContent = '—';
-    picker.hidden = true;
-    const why = local?.reason === 'Cursor DB not found'
-      ? 'Cursor’s local database was not found. Sign in to Cursor and open a chat.'
-      : local?.reason || 'Local chat data is unavailable.';
-    body.append(el('div', { class: 'empty', text: why }));
-    cats.append(el('div', { class: 'empty', text: 'No context snapshot to break down.' }));
-    billed.append(el('div', { class: 'empty', text: 'No chat selected.' }));
-    return;
-  }
-  picker.hidden = false;
+const SESSION_ROWS = 6;
+const TOP_SHOWN = 5;
+const CHART_BARS = 240;
 
-  // Chat picker — rebuilt only when the list actually changes, so the open
-  // dropdown does not slam shut on every poll.
-  const signature = provider + JSON.stringify(local.chats || []);
-  if (select.dataset.signature !== signature) {
-    select.dataset.signature = signature;
-    select.replaceChildren(...(local.chats || []).map((c) => el('option', { value: c.id, text: c.name })));
-  }
-  select.value = local.chat?.id || '';
-
-  const chat = local.chat;
-  if (!chat || chat.error) {
-    $('chatModel').textContent = '—';
-    body.append(el('div', {
-      class: 'empty',
-      text: chat ? chat.error : local.reason || 'No session selected.',
-    }));
-    cats.append(el('div', { class: 'empty', text: 'No context snapshot to break down.' }));
-    billed.append(el('div', { class: 'empty', text: 'Nothing to attribute yet.' }));
-    return;
-  }
-
-  $('chatModel').textContent = chat.model || '—';
-  if (provider !== 'cursor') {
-    body.append(el('div', {class:'tile-value',text:known(chat.used) ? `${compact(chat.used)} input tokens` : 'Usage unavailable'}));
-    body.append(el('p', {class:'tile-note',text:chat.measurement}));
-    const usageTime = chat.usage_at ? Date.parse(chat.usage_at)/1000 : null;
-    body.append(el('p', {class:'tile-note',text:`${chat.source} · session updated ${relativeTime(chat.updated_at)}${known(usageTime) ? ` · usage recorded ${relativeTime(usageTime)}` : ''}`}));
-    body.append(el('p', {class:'tile-note',text:known(chat.limit) ? `Reported context limit: ${compact(chat.limit)} tokens` : 'Context limit was not recorded. No context percentage is inferred.'}));
-    const metrics = Object.entries(chat.metrics || {});
-    for (const [label,value] of metrics) cats.append(el('div',{class:'cat'},[
-      el('span',{class:'cat-name',text:label}),el('span',{class:'cat-val',text:compact(value)})]));
-    if (!metrics.length) cats.append(el('p',{class:'empty',text:'No token-usage record in the recent portion of this session log.'}));
-    renderSessionCost(billed, chat.cost);
-    return;
-  }
-  body.append(el('p',{class:'tile-note',text:`Session updated ${relativeTime(chat.updated_at)} · ${chat.measurement}`}));
-  const usedPct = known(chat.used) && known(chat.limit) && chat.limit > 0 ? (100 * chat.used) / chat.limit : chat.pct;
-  // A context window is not a billing pool — half full is unremarkable.
-  const severity = usedPct >= 90 ? 'now' : usedPct >= 70 ? 'soon' : 'ok';
-
-  body.append(el('div', { class: 'tile-value', text: `${compact(chat.used)} / ${compact(chat.limit)}` }));
-  body.append(el('div', { class: 'tile-note', text: `${pct(usedPct, 1)} of context · ${chat.name} · Cursor local snapshot` }));
-  const meter = el('div', { class: 'meter', vars: { '--c': severity === 'ok' ? PROVIDER_HUE.cursor : SEVERITY[severity] } }, [el('i', {})]);
-  meter.querySelector('i').style.width = known(usedPct) ? `${Math.min(100, usedPct).toFixed(1)}%` : '0%';
-  meter.classList.add('gap-above');
-  body.append(meter);
-
-  // Categories
-  $('chatTax').textContent = `${pct(chat.tax_pct)} non-conversation context`;
-  const rows = chat.cat_rows || [];
-  if (!rows.length) {
-    cats.append(el('div', { class: 'empty', text: 'No category breakdown in this snapshot.' }));
-  }
-  let group = null;
-  for (const row of rows) {
-    const nextGroup = row.overhead ? 'tax' : 'conversation';
-    if (nextGroup !== group) {
-      group = nextGroup;
-      cats.append(el('div', {
-        class: 'kicker cat-group',
-        text: row.overhead ? 'Non-conversation context (Cursor estimate)' : 'Conversation (Cursor estimate)',
-      }));
-    }
-    const node = el('div', { class: 'cat' }, [
-      el('span', { class: 'cat-name', text: row.label }),
-      el('span', { class: 'cat-val', text: `${compact(row.tokens)} · ${pct(row.share)}` }),
-    ]);
-    const bar = el('div', { class: 'meter is-plain cat-bar' }, [el('i', {})]);
-    bar.style.setProperty('--c', row.overhead ? 'var(--ink-4)' : PROVIDER_HUE.cursor);
-    bar.querySelector('i').style.width = known(row.share) ? `${Math.min(100, row.share).toFixed(1)}%` : '0%';
-    node.append(bar);
-    cats.append(node);
-  }
-
-  // Event-reported usage value for this chat, distinct from billed charges.
-  const match = (state.cycle?.conversations || []).find((c) => c.id === chat.id);
-  if (!state.cycle?.events_complete || !match) {
-    billed.append(el('div', {
-      class: 'empty',
-      text: !state.cycle?.events_complete ? 'Chat usage value unavailable: complete event history has not been loaded.' : 'This chat was not found in the loaded usage results.',
-    }));
-  } else {
-    billed.append(el('div', { class: 'tile-value', text: money(match.cents) }));
-    billed.append(el('div', {class:'tile-note',text:'Event-reported usage value; this is not a cash charge.'}));
-    billed.append(el('div', {
-      class: 'tile-note',
-      text: `${compact(match.n)} recorded events · source: Cursor usage history`,
-    }));
-    billed.append(el('div', {
-      class: 'tile-note',
-      text: `${compact(match.out)} out · ${compact(match.cr)} cache read`,
-    }));
-  }
+function agoText(epoch) {
+  if (!known(epoch)) return '—';
+  const secs = Math.max(0, Date.now() / 1000 - epoch);
+  if (secs < 60) return 'just now';
+  if (secs < 3600) return `${Math.round(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.round(secs / 3600)}h ago`;
+  if (secs < 2 * 86400) return 'yesterday';
+  return new Date(epoch * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-function renderSessionCost(container, cost) {
-  if (known(cost?.cents) && cost.reported) {
-    // A value the provider itself reports; nothing here is estimated.
-    container.append(el('div',{class:'tile-value',text:`≈ ${money(cost.cents, cost.cents < 100 ? 4 : 2)}`}));
-    container.append(el('p',{class:'tile-note',text:cost.basis}));
-    return;
+/** Per-request amounts: cents below a dollar, dollars above. */
+function centsText(c) {
+  if (!known(c)) return '—';
+  if (c >= 100) return money(c);
+  return `${c < 1 ? c.toFixed(2) : c < 10 ? c.toFixed(1) : Math.round(c)}¢`;
+}
+
+/** "$25" or "$0.50" per million tokens, from what a part actually cost. */
+function perMillion(cents, tokens) {
+  const rate = (cents / tokens) * 1e4;
+  return `$${rate < 1 ? rate.toFixed(2) : +rate.toFixed(2)}/M`;
+}
+
+function splitName(name) {
+  const at = String(name || '').lastIndexOf(' · ');
+  return at > 0 ? [name.slice(0, at), name.slice(at + 3)] : [name || 'Untitled session', null];
+}
+
+function median(values) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/** What the per-request series says about a session as a whole. */
+function sessionStats(cost) {
+  const series = cost?.series || [];
+  const values = series.map(r => r[1]);
+  const rebuilds = series.filter(r => r[2]);
+  const early = series.length >= 20 && cost.series_start === 0 ? values.slice(0, 10).reduce((a, b) => a + b, 0) / 10 : null;
+  const last = cost?.last_request_cents;
+  return {
+    typical: median(values),
+    early,
+    last,
+    rebuilds: rebuilds.length,
+    rebuildCents: rebuilds.reduce((a, r) => a + r[1], 0),
+    firstContext: cost?.series_start === 0 && series.length ? series[0][3] : null,
+    climbing: known(early) && known(last) && early > 0 && last >= 1.5 * early,
+  };
+}
+
+/** Why one request cost what it did, from its own token classes. */
+function explainRequest(d, stats) {
+  const parts = [...(d.parts || [])].sort((a, b) => b[2] - a[2]);
+  if (!parts.length) return { tag: 'No priced tokens', why: [] };
+  const [label, tokens, cents] = parts[0];
+  const why = [];
+  let tag;
+  if (label.startsWith('Cache write')) {
+    const hour = label.includes('1-hour');
+    const ttl = hour ? 3600 : 300;
+    if (d.index === 0) {
+      tag = 'First request';
+      why.push(`First request of the session: ${compact(tokens)} tokens of starting context were written to the cache.`);
+    } else if (d.previous_model && d.model && d.previous_model !== d.model) {
+      tag = 'Model switch';
+      why.push(`The model changed from ${d.previous_model} to ${d.model}. Each model keeps its own cache, so ${compact(tokens)} tokens of context were cached again.`);
+    } else if (known(d.gap) && d.gap > ttl) {
+      tag = `Cache expired · ${duration(d.gap)} idle`;
+      why.push(`Nothing was sent for ${duration(d.gap)} before this, longer than the ${hour ? '1-hour' : '5-minute'} cache lasts, so ${compact(tokens)} tokens of context were written to the cache again.`);
+    } else if (d.rebuild) {
+      tag = 'Cache rebuild';
+      why.push(`${compact(tokens)} tokens were written to the cache again${known(d.gap) ? ` ${duration(d.gap)} after the previous request` : ''}. The cached copy no longer matched the start of the context, which happens after a compaction or when earlier context changes.`);
+    } else {
+      tag = `New context · ${compact(tokens)}`;
+      why.push(`${compact(tokens)} new tokens entered the cache: the previous reply, tool results or files added to the context, at ${perMillion(cents, tokens)}.`);
+    }
+  } else if (label === 'Output') {
+    tag = `Long output · ${compact(tokens)}`;
+    why.push(`A long output: ${compact(tokens)} tokens written (a long reply, code or file edits). Output is the priciest token class, at ${perMillion(cents, tokens)}.`);
+  } else if (label === 'Cache read' || label === 'Cached input') {
+    const growth = known(stats?.firstContext) && stats.firstContext > 0 ? d.context / stats.firstContext : null;
+    tag = `Big context · ${compact(d.context)}`;
+    why.push(`A big context: ${compact(tokens)} tokens re-read from the cache${growth >= 2 ? `, ${growth.toFixed(0)}× the size at the start of the session` : ''}. Cheap per token at ${perMillion(cents, tokens)}, but paid again on every request.`);
+  } else {
+    tag = `Uncached input · ${compact(tokens)}`;
+    why.push(`${compact(tokens)} input tokens were sent without a cache hit, at the full input rate of ${perMillion(cents, tokens)}.`);
   }
-  if (!known(cost?.cents)) {
-    container.append(el('p',{class:'empty',text:'Cost unavailable: no recorded requests with supported model pricing and complete token counts.'}));
-    if (known(cost?.last_request_cents)) container.append(el('p',{class:'tile-note',text:`Last request estimate: ${money(cost.last_request_cents, 4)}`}));
-    return;
-  }
-  container.append(el('div',{class:'tile-value',text:`≈ ${money(cost.cents, cost.cents > 0 && cost.cents < 1 ? 4 : 2)}`}));
-  container.append(el('p',{class:'tile-note',text:cost.partial
+  if (d.long_context) why.push('Over 272k input tokens, so the whole request was billed at the long-context rate (2× input, 1.5× output).');
+  return { tag, why, dominant: label, share: d.cents > 0 ? cents / d.cents : 0 };
+}
+
+/** The notes a cost figure needs to be read correctly. */
+function costNotes(cost) {
+  if (!cost) return ['Cost unavailable: this log has no recorded requests with supported model pricing.'];
+  if (cost.reported) return [cost.basis, (cost.series || []).length ? 'Per-request amounts are estimates at API rates from the session log.' : null].filter(Boolean);
+  const notes = [];
+  if (!known(cost.cents)) notes.push('Cost unavailable: no recorded requests with supported model pricing and complete token counts.');
+  else notes.push(cost.partial
     ? `Partial estimate · ${cost.priced_requests} priced requests. Some usage could not be priced or read.`
-    : `${cost.priced_requests} recorded requests · API-equivalent estimate`}));
-  if (known(cost.last_request_cents)) container.append(el('p',{class:'tile-note',text:`Last request: ≈ ${money(cost.last_request_cents, 4)}`}));
-  container.append(el('p',{class:'tile-note',text:cost.basis}));
-  container.append(el('p',{class:'tile-note',text:`Pricing checked ${cost.pricing_date} · excludes separate subagent logs.`}));
+    : `${cost.priced_requests} recorded requests · API-equivalent estimate.`);
+  if (cost.basis) notes.push(cost.basis);
+  if (cost.pricing_date) notes.push(`Pricing checked ${cost.pricing_date} · excludes separate subagent logs.`);
+  return notes;
+}
+
+const PART_TONE = {
+  'Uncached input': 'in', 'Cache read': 'read', 'Cached input': 'read',
+  'Cache write (5-minute)': 'write', 'Cache write (1-hour)': 'write', Output: 'out',
+};
+
+function sessionRow({ provider, row, selected, open, live, chat }) {
+  const [title, shortId] = splitName(row.name);
+  const cursorMatch = provider === 'cursor' ? (state.cycle?.conversations || []).find(c => c.id === row.id) : null;
+  const cost = selected && chat?.cost ? { cents: chat.cost.cents, requests: chat.cost.priced_requests }
+    : cursorMatch ? { cents: cursorMatch.cents, events: cursorMatch.n }
+    : { cents: row.cents, requests: row.requests };
+  const model = row.model || (selected ? chat?.model : null);
+  const when = live
+    ? el('span', { class: 'sess-live' }, [el('i', {}), 'Live'])
+    : el('span', { text: agoText(selected && chat?.updated_at ? chat.updated_at : row.updated_at) });
+  return el('button', {
+    type: 'button',
+    class: `sess-row${open ? ' is-open' : ''}${selected ? ' is-selected' : ''}`,
+    'data-key': `row:${row.id}`,
+    'aria-expanded': selected ? String(open) : null,
+    vars: { '--c': PROVIDER_HUE[provider] },
+    onclick: () => (selected ? toggleSessionOpen() : openSession(row.id)),
+  }, [
+    el('span', { class: 'prov-mark' }, [icon(PROVIDER_GLYPH[provider], 17)]),
+    el('span', { class: 'sess-row-text' }, [
+      el('span', { class: 'sess-row-name', text: title }),
+      el('span', { class: 'sess-row-sub' }, [when, model && el('span', { text: model }), shortId && el('code', { text: shortId })]),
+    ]),
+    known(cost.cents)
+      ? el('span', { class: 'sess-row-cost' }, [money(cost.cents), el('small', {
+        text: cost.events !== undefined ? `${compact(cost.events)} events` : `${compact(cost.requests)} requests`,
+      })])
+      : el('span'),
+    iconWithClass(ICONS.chevron, 'sess-chev', 16),
+  ]);
+}
+
+/** One bar per request (or per few, on long sessions); the requests that
+    ran past the scale carry their price above them. */
+function sessionChart(cost, hue, top) {
+  const series = cost.series || [];
+  const n = series.length;
+  const per = Math.max(1, Math.ceil(n / CHART_BARS));
+  const bars = [];
+  for (let i = 0; i < n; i += per) {
+    const group = series.slice(i, i + per);
+    const rebuild = group.some(r => r[2]);
+    const value = rebuild || per === 1 ? Math.max(...group.map(r => r[1])) : group.reduce((a, r) => a + r[1], 0) / group.length;
+    bars.push({ first: cost.series_start + i, count: group.length, value, rebuild, at: group[0][0], context: group[group.length - 1][3] });
+  }
+  const width = Math.max(bars.length, 24);
+  const ordinary = bars.filter(b => !b.rebuild).map(b => b.value).sort((a, b) => a - b);
+  const p95 = ordinary.length ? ordinary[Math.min(ordinary.length - 1, Math.floor(ordinary.length * 0.95))] : Math.max(...bars.map(b => b.value));
+  const cap = Math.max(p95 * 1.25, 0.01);
+  const selected = state.sessionRequest;
+  const topIndexes = new Set(top.map(t => t.index));
+
+  const svg = svgEl('svg', { class: 'sc-svg', viewBox: `0 0 ${width} 100`, preserveAspectRatio: 'none', 'aria-hidden': 'true' });
+  bars.forEach((bar, i) => {
+    const h = Math.max(1.5, Math.min(1, bar.value / cap) * 100);
+    const holds = (index) => index >= bar.first && index < bar.first + bar.count;
+    const cls = ['sc-bar', bar.rebuild && 'is-rebuild', [...topIndexes].some(holds) && 'is-top', known(selected) && holds(selected) && 'is-picked'].filter(Boolean).join(' ');
+    svg.append(svgEl('rect', { class: cls, x: i + 0.14, y: 100 - h, width: 0.72, height: h }));
+  });
+  const plot = el('div', { class: 'sc-plot', vars: { '--c': hue } }, [svg]);
+  for (const level of [0.5, 1]) {
+    plot.append(el('i', { class: 'sc-grid', vars: { '--y': 100 - level * 100 } }));
+    plot.append(el('span', { class: 'sc-grid-label', vars: { '--y': 100 - level * 100 }, text: centsText(cap * level) }));
+  }
+  // Price tags on the bars that ran off the scale, dearest first, skipping
+  // any that would sit on top of one already placed.
+  const clipped = bars.map((bar, i) => ({ bar, x: ((i + 0.5) / width) * 100 }))
+    .filter(({ bar }) => bar.value > cap).sort((a, b) => b.bar.value - a.bar.value);
+  const tagged = [];
+  for (const spike of clipped) if (tagged.length < 5 && tagged.every(t => Math.abs(t.x - spike.x) >= 10)) tagged.push(spike);
+  for (const { bar, x } of tagged) {
+    plot.append(el('span', { class: `sc-spike${bar.rebuild ? ' is-rebuild' : ''}`, vars: { '--x': x }, text: centsText(bar.value) }));
+  }
+  // Every bar answers a hover; the priciest ones also open their breakdown.
+  const barAt = (event) => {
+    const box = plot.getBoundingClientRect();
+    const i = Math.floor(((event.clientX - box.left) / box.width) * width);
+    return bars[i] || null;
+  };
+  plot.addEventListener('mouseleave', () => tooltip.hide());
+  plot.addEventListener('mousemove', (event) => {
+    const bar = barAt(event);
+    if (!bar) return tooltip.hide();
+    const request = top.find(t => t.index >= bar.first && t.index < bar.first + bar.count);
+    tooltip.show([
+      el('b', { text: `${centsText(bar.value)}${bar.count > 1 ? ` · ${bar.count} requests` : ''}` }),
+      el('div', { class: 'muted', text: `${known(bar.at) ? new Date(bar.at * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : 'Time not recorded'} · ${compact(bar.context)} context${bar.rebuild ? ' · cache rebuild' : ''}` }),
+      request && el('div', { class: 'muted', text: 'Click for the breakdown' }),
+    ].filter(Boolean), event);
+    plot.classList.toggle('is-pointing', Boolean(request));
+  });
+  plot.addEventListener('click', (event) => {
+    const bar = barAt(event);
+    const request = bar && top.find(t => t.index >= bar.first && t.index < bar.first + bar.count);
+    if (request) pickRequest(request.index);
+  });
+
+  const firstAt = series[0]?.[0];
+  const lastAt = series[n - 1]?.[0];
+  const clock = (epoch) => known(epoch) ? momentText(epoch, Math.max(0, Date.now() / 1000 - epoch) + 1) : '—';
+  const lastBarEdge = (bars.length / width) * 100;
+  return el('div', { class: 'sc' }, [
+    plot,
+    el('div', { class: 'sc-axis', vars: { '--end': lastBarEdge } }, [
+      el('span', { text: `${cost.series_start ? `Request ${compact(cost.series_start + 1)}` : 'First request'} · ${clock(firstAt)}` }),
+      el('span', { class: 'sc-axis-end', text: known(lastAt) && Date.now() / 1000 - lastAt < 120 ? 'now' : clock(lastAt) }),
+    ]),
+    el('div', { class: 'proj-legend' }, [
+      el('span', {}, [el('i', { class: 'sw sw-bar' }), per > 1 ? `Cost per request (each bar ${per} requests)` : 'Cost per request']),
+      bars.some(b => b.rebuild) && el('span', {}, [el('i', { class: 'sw sw-bar is-rebuild' }), 'Cache rebuild']),
+      top.length > 0 && el('span', {}, [el('i', { class: 'sw sw-bar is-top' }), 'Priciest, click for why']),
+    ]),
+  ]);
+}
+
+function requestBreakdown(d, stats) {
+  const story = explainRequest(d, stats);
+  const parts = [...d.parts].sort((a, b) => b[2] - a[2]);
+  return el('div', { class: 'req-detail' }, [
+    el('div', { class: 'req-mix' }, parts.map(([label, , cents]) =>
+      el('i', { class: `tone-${PART_TONE[label] || 'in'}`, vars: { '--w': Math.max(cents, d.cents * 0.004) } }))),
+    el('div', { class: 'req-parts' }, parts.map(([label, tokens, cents]) => el('div', { class: `req-part tone-${PART_TONE[label] || 'in'}` }, [
+      el('i', {}),
+      el('span', { class: 'req-part-name', text: label }),
+      el('span', { class: 'req-part-tokens', text: `${compact(tokens)} tok × ${perMillion(cents, tokens)}` }),
+      el('b', { text: centsText(cents) }),
+      el('span', { class: 'req-part-share', text: d.cents > 0 ? pct((100 * cents) / d.cents) : '—' }),
+    ]))),
+    el('div', { class: 'req-why' }, [
+      iconWithClass(ICONS.spark, '', 16),
+      el('div', {}, story.why.map(text => el('p', { text }))),
+    ]),
+    el('div', { class: 'req-facts' }, [
+      el('span', { text: `Request ${compact(d.index + 1)}` }),
+      known(d.at) && el('span', { text: new Date(d.at * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) }),
+      el('span', { text: `${compact(d.context)} context` }),
+      known(d.gap) && el('span', { text: `${duration(d.gap)} after the previous request` }),
+      d.model && el('span', { text: d.model }),
+    ]),
+  ]);
+}
+
+function topRequests(top, stats) {
+  const list = el('div', { class: 'req-list' }, [
+    el('div', { class: 'req-list-head' }, [
+      el('span', { class: 'kicker', text: 'Most expensive requests' }),
+      known(stats.typical) && el('span', { class: 'req-list-meta', text: `typical request ${centsText(stats.typical)}` }),
+    ]),
+  ]);
+  top.slice(0, TOP_SHOWN).forEach((d, rank) => {
+    const open = state.sessionRequest === d.index;
+    const story = explainRequest(d, stats);
+    const times = known(stats.typical) && stats.typical > 0 ? d.cents / stats.typical : null;
+    list.append(el('button', {
+      type: 'button',
+      class: `req-row${open ? ' is-open' : ''}`,
+      'data-key': `req:${d.index}`,
+      'aria-expanded': String(open),
+      onclick: () => pickRequest(d.index),
+    }, [
+      el('span', { class: 'req-rank', text: String(rank + 1) }),
+      el('span', { class: 'req-cost', text: centsText(d.cents) }),
+      // Always present so the columns line up; empty when unremarkable.
+      el('span', { class: `req-times${times >= 5 ? ' is-hot' : ''}`, text: known(times) && times >= 1.5 ? `${times >= 10 ? times.toFixed(0) : times.toFixed(1)}× typical` : '' }),
+      el('span', { class: 'req-tag', text: story.tag }),
+      el('span', { class: 'req-when', text: known(d.at) ? new Date(d.at * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '' }),
+      iconWithClass(ICONS.chevron, 'sess-chev', 15),
+    ]));
+    if (open) list.append(requestBreakdown(d, stats));
+  });
+  return list;
+}
+
+function lastTurn(chat) {
+  const m = chat.metrics || {};
+  const output = m['Last request output'] ?? m['Output tokens this session'];
+  const read = m['Last request cache read'] ?? m['Last request cached input (included in input)'];
+  const total = known(m['Last request cache read'])
+    ? ['Last request uncached input', 'Last request cache read', 'Last request cache write'].reduce((a, k) => a + (m[k] ?? NaN), 0)
+    : m['Last request input'];
+  const cached = known(read) && known(total) && total > 0 ? (100 * read) / total : null;
+  const bits = [
+    known(chat.used) && `${compact(chat.used)} in`,
+    known(output) && `${compact(output)} out${m['Last request output'] === undefined ? ' this session' : ''}`,
+    known(cached) && `${pct(cached, cached >= 99 ? 1 : 0)} from cache`,
+  ].filter(Boolean);
+  const node = el('div', { class: 'sess-last' }, [
+    el('span', { class: 'kicker', text: 'Last turn' }),
+    el('span', { text: bits.join(' · ') || 'No token counts recorded' }),
+  ]);
+  if (known(chat.limit) && chat.limit > 0 && known(chat.used)) {
+    const share = Math.min(100, (100 * chat.used) / chat.limit);
+    node.append(el('div', { class: 'sess-context' }, [
+      el('div', { class: 'meter is-plain', vars: { '--c': share >= 90 ? 'var(--now)' : 'var(--c)', '--w': share } }, [el('i', { class: 'sess-context-fill' })]),
+      el('span', { text: `${pct(share)} of ${compact(chat.limit)} context` }),
+    ]));
+  }
+  return node;
+}
+
+function sessionDetail(provider, chat) {
+  const cost = chat.cost;
+  const stats = sessionStats(cost);
+  const top = cost?.top_requests || [];
+  const hue = PROVIDER_HUE[provider];
+  const detail = el('div', { class: 'sess-detail', vars: { '--c': hue } });
+  if (known(cost?.cents) && (cost.series || []).length) {
+    const headline = stats.climbing ? `${centsText(stats.last)} a turn now, up from ${centsText(stats.early)}`
+      : known(stats.typical) ? `About ${centsText(stats.typical)} a turn` : 'Priced requests';
+    const support = [
+      stats.climbing && 'Every request re-reads the whole context, so each turn costs more as the chat grows.',
+      stats.rebuilds ? `**${stats.rebuilds}** cache rebuild${stats.rebuilds === 1 ? '' : 's'}, where the context was written to the cache again, cost **${money(stats.rebuildCents)}**.`
+        : 'No cache rebuilds: the context stayed cached from one request to the next.',
+    ].filter(Boolean).join(' ');
+    detail.append(
+      el('div', { class: 'proj-headline', text: headline }),
+      rich('div', 'proj-support', support),
+      sessionChart(cost, hue, top.slice(0, TOP_SHOWN)),
+      el('div', { class: 'wc-tiles is-4' }, [
+        top[0] ? el('button', { type: 'button', class: 'wc-tile is-action is-hot', 'data-key': 'priciest', onclick: () => pickRequest(top[0].index) }, [
+          el('b', { text: centsText(top[0].cents) }), el('span', { text: 'priciest request' })]) : null,
+        el('div', { class: 'wc-tile' }, [el('b', { text: centsText(stats.typical) }), el('span', { text: 'typical request' })]),
+        el('div', { class: `wc-tile${stats.rebuilds ? ' is-hot' : ' is-good'}` }, [
+          el('b', {}, [String(stats.rebuilds), stats.rebuilds ? el('small', { text: ` · ${money(stats.rebuildCents)}` }) : null]),
+          el('span', { text: 'cache rebuilds' })]),
+        el('div', { class: 'wc-tile' }, [el('b', { text: centsText(stats.last) }), el('span', { text: 'last request' })]),
+      ]),
+      top.length ? topRequests(top, stats) : null,
+    );
+  } else if (known(cost?.cents)) {
+    detail.append(el('div', { class: 'proj-headline', text: `${money(cost.cents)} this session` }));
+  } else {
+    detail.append(el('p', { class: 'empty', text: 'No priced requests in this log yet.' }));
+  }
+  detail.append(lastTurn(chat));
+  const usageTime = chat.usage_at ? Date.parse(chat.usage_at) / 1000 : null;
+  detail.append(el('div', { class: 'sess-notes' }, [
+    chat.measurement,
+    `${chat.source} · session updated ${relativeTime(chat.updated_at)}${known(usageTime) ? ` · usage recorded ${relativeTime(usageTime)}` : ''}`,
+    known(chat.limit) ? null : 'Context limit was not recorded, so no context percentage is shown.',
+    ...costNotes(cost),
+  ].filter(Boolean).map(text => el('p', { text }))));
+  return detail;
+}
+
+function cursorDetail(chat) {
+  const detail = el('div', { class: 'sess-detail', vars: { '--c': PROVIDER_HUE.cursor } });
+  const usedPct = known(chat.used) && known(chat.limit) && chat.limit > 0 ? (100 * chat.used) / chat.limit : chat.pct;
+  // A context window is not a billing pool: half full is unremarkable.
+  const severity = usedPct >= 90 ? 'now' : usedPct >= 70 ? 'soon' : 'ok';
+  detail.append(
+    el('div', { class: 'proj-headline', text: known(usedPct) ? `${pct(usedPct, 1)} of context used` : 'Context size unavailable' }),
+    el('div', { class: 'proj-support', text: `${compact(chat.used)} of ${compact(chat.limit)} tokens · ${pct(chat.tax_pct)} is non-conversation context` }),
+    el('div', { class: 'meter sess-cursor-meter', vars: { '--c': severity === 'ok' ? PROVIDER_HUE.cursor : SEVERITY[severity], '--w': known(usedPct) ? Math.min(100, usedPct) : 0 } }, [el('i', { class: 'sess-context-fill' })]),
+  );
+  const rows = chat.cat_rows || [];
+  const cats = el('div', { class: 'cat-rows' });
+  if (!rows.length) cats.append(el('p', { class: 'empty', text: 'No category breakdown in this snapshot.' }));
+  let group = null;
+  for (const row of rows) {
+    const next = row.overhead ? 'tax' : 'conversation';
+    if (next !== group) {
+      group = next;
+      cats.append(el('div', { class: 'kicker cat-group', text: row.overhead ? 'Non-conversation context (Cursor estimate)' : 'Conversation (Cursor estimate)' }));
+    }
+    cats.append(el('div', { class: 'cat' }, [
+      el('span', { class: 'cat-name', text: row.label }),
+      el('span', { class: 'cat-val', text: `${compact(row.tokens)} · ${pct(row.share)}` }),
+      el('div', { class: 'meter is-plain cat-bar', vars: { '--c': row.overhead ? 'var(--ink-4)' : PROVIDER_HUE.cursor, '--w': known(row.share) ? Math.min(100, row.share) : 0 } }, [el('i', { class: 'sess-context-fill' })]),
+    ]));
+  }
+  detail.append(cats);
+  const match = (state.cycle?.conversations || []).find(c => c.id === chat.id);
+  const notes = [`Session updated ${relativeTime(chat.updated_at)} · ${chat.measurement}`];
+  if (!state.cycle?.events_complete || !match) {
+    notes.push(!state.cycle?.events_complete ? 'Chat usage value unavailable: complete event history has not been loaded.' : 'This chat was not found in the loaded usage results.');
+  } else {
+    detail.append(el('div', { class: 'wc-tiles' }, [
+      el('div', { class: 'wc-tile' }, [el('b', { text: money(match.cents) }), el('span', { text: 'usage value' })]),
+      el('div', { class: 'wc-tile' }, [el('b', { text: compact(match.n) }), el('span', { text: 'recorded events' })]),
+      el('div', { class: 'wc-tile' }, [el('b', { text: compact(match.out) }), el('span', { text: `out · ${compact(match.cr)} cache read` })]),
+    ]));
+    notes.push('Event-reported usage value from Cursor usage history; this is not a cash charge.');
+  }
+  detail.append(el('div', { class: 'sess-notes' }, notes.map(text => el('p', { text }))));
+  return detail;
+}
+
+function openSession(id) {
+  // Picking a specific chat is itself an override: it locks Auto onto
+  // whichever provider it just found, so the pin means what it says.
+  if (state.sessionProvider === 'auto') state.sessionProvider = effectiveProvider();
+  state.pinned = id;
+  state.sessionOpen = true;
+  state.sessionRequest = null;
+  if (state.local) state.local = { ...state.local, chat: null, reason: 'Loading selected session…' };
+  saveSessionChoice();
+  renderChat();
+  refreshLocal();
+}
+
+function toggleSessionOpen() {
+  state.sessionOpen = !state.sessionOpen;
+  renderChat();
+}
+
+function pickRequest(index) {
+  state.sessionRequest = state.sessionRequest === index ? null : index;
+  renderChat();
+}
+
+function renderSessionControls(provider, followsOpen, isAuto) {
+  for (const chip of document.querySelectorAll('#sessionProviders [data-provider]')) {
+    chip.setAttribute('aria-checked', String(chip.dataset.provider === state.sessionProvider));
+    if (chip.dataset.provider === 'auto') chip.textContent = isAuto && state.autoDetected ? `Auto · ${provider === 'claude' ? 'Claude Code' : 'Codex'}` : 'Auto';
+  }
+  const followProvider = provider === 'codex' ? state.activeChatSupported : provider === 'claude';
+  $('sessionFollowRow').hidden = isAuto || !followProvider || provider === 'cursor';
+  for (const chip of document.querySelectorAll('#sessionFollowRow [data-follow]')) {
+    chip.setAttribute('aria-checked', String(chip.dataset.follow === state.sessionFollow));
+  }
+  $('sessionFollowOpen').textContent = provider === 'claude' ? 'Open session' : 'Open chat';
+  // A Claude session found through its log rather than the status line is
+  // said so: it is the chat being written to, not a chat seen on screen.
+  const local = state.local;
+  const claudeOpen = local?.follow_source === 'recent log' ? 'Claude Code session active in the last 15 minutes' : 'open Claude Code session';
+  $('sessionMode').textContent = state.pinned ? 'Pinned · stays on the session you picked.'
+    : isAuto ? (state.autoActive ? `Following the ${provider === 'claude' ? claudeOpen : 'open Codex chat'}.`
+                                  : 'No open Codex or Claude Code chat detected right now.')
+    : followsOpen ? `Following the ${provider === 'claude' ? claudeOpen : 'open Codex chat'} · switches when you do.`
+    : 'Latest activity · the most recently updated session, including background tasks.';
+  $('sessionModeDot').classList.toggle('is-on', !state.pinned && (isAuto ? state.autoActive : followsOpen) && Boolean(local?.chat));
+  const unpin = $('btnUnpin');
+  unpin.hidden = !state.pinned;
+  unpin.textContent = followsOpen || isAuto ? (provider === 'claude' ? 'Follow open session' : 'Follow open chat') : 'Follow latest activity';
+}
+
+function renderChat() {
+  const local = state.local;
+  const provider = effectiveProvider();
+  const isAuto = state.sessionProvider === 'auto';
+  const followProvider = provider === 'codex' ? state.activeChatSupported : provider === 'claude';
+  const followsOpen = isAuto ? state.autoActive : (followProvider && state.sessionFollow === 'active');
+  renderSessionControls(provider, followsOpen, isAuto);
+
+  const list = $('sessionList');
+  const focused = document.activeElement?.closest?.('#sessionList [data-key]')?.dataset.key;
+  list.replaceChildren();
+  if (!local?.available) {
+    const why = local?.reason === 'Cursor DB not found'
+      ? 'Cursor’s local database was not found. Sign in to Cursor and open a chat.'
+      : local?.reason || (local ? 'Local chat data is unavailable.' : 'Loading sessions…');
+    list.append(el('p', { class: 'empty', text: why }));
+    return;
+  }
+  const chat = local.chat && !local.chat.error ? local.chat : null;
+  const selectedId = chat?.id ?? state.pinned ?? null;
+  if (state.sessionFor !== selectedId) {
+    state.sessionFor = selectedId;
+    state.sessionRequest = null;
+  }
+  const chats = local.chats || [];
+  const limit = state.sessionRows || SESSION_ROWS;
+  const shown = chats.slice(0, limit);
+  if (selectedId && !shown.some(c => c.id === selectedId)) {
+    const picked = chats.find(c => c.id === selectedId) || (chat ? { id: chat.id, name: chat.name, updated_at: chat.updated_at } : null);
+    if (picked) shown.unshift(picked);
+  }
+  if (!selectedId || (!chat && !state.pinned)) {
+    list.append(el('p', { class: 'sess-note', text: local.chat?.error || local.reason || 'No session selected. Pick one below.' }));
+  }
+  const live = !state.pinned && (isAuto ? state.autoActive : followsOpen);
+  for (const row of shown) {
+    const selected = row.id === selectedId;
+    const open = selected && state.sessionOpen !== false;
+    list.append(sessionRow({ provider, row, selected, open, live: selected && live && Boolean(chat), chat }));
+    if (!open) continue;
+    if (!chat) list.append(el('div', { class: 'sess-detail' }, [el('p', { class: 'empty', text: local.chat?.error || local.reason || 'Loading selected session…' })]));
+    else list.append(provider === 'cursor' ? cursorDetail(chat) : sessionDetail(provider, chat));
+  }
+  if (!chats.length) list.append(el('p', { class: 'empty', text: 'No recent sessions found for this provider.' }));
+  if (chats.length > limit) {
+    list.append(el('button', {
+      type: 'button', class: 'sess-more', 'data-key': 'more',
+      text: `Show more sessions (${chats.length - limit} older)`,
+      onclick: () => { state.sessionRows = limit + 12; renderChat(); },
+    }));
+  }
+  if (focused) list.querySelector(`[data-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
 }
 
 // ── resets ────────────────────────────────────────────────────────────────
@@ -895,100 +1263,472 @@ function handleLinkState(link) {
   renderLegend();
 }
 
-function paceRow(p) {
-  const severity = PACE_SEVERITY[p.status];
-  return el('div', { class: 'pace', vars: { '--c': SEVERITY[severity] } }, [
-    el('span', { class: 'badge', text: PACE_BADGE[p.status] }),
-    el('span', { class: 'pace-text', text: paceSentence(p) }),
+// Each window is a Material 3 card after Android's Data usage meter: the
+// reading, a bar with the even-pace mark, three stat tiles. Opening a card
+// adds the projection from Android's Battery screen — when the current rate
+// runs dry, drawn against the even pace to the reset. The one line drawn
+// from the past is the straight average since the window opened: providers
+// report a single reading, not a history.
+
+const PACE_ICON = {
+  fast: ['M13 2 4 14h7l-1 8 9-12h-7z'],
+  ahead: ['m3 17 6-6 4 4 8-8', 'M14 7h7v7'],
+  'on-pace': ICONS.check,
+  spare: ICONS.spark,
+  early: ICONS.clock,
+  exhausted: ICONS.alert,
+};
+
+// Generic shapes, not logos: a burst, a prompt, a pointer.
+const PROVIDER_GLYPH = {
+  claude: ['M12 3v18', 'M3 12h18', 'm5.6 5.6 12.8 12.8', 'm18.4 5.6-12.8 12.8'],
+  codex: ['m5 17 6-5-6-5', 'M13 19h7'],
+  cursor: ['M5 3l6.5 17 2.4-7.1L21 10.5z'],
+};
+
+/** A reset or run-out moment, as short as the window allows. */
+function momentText(epoch, span) {
+  if (!known(epoch)) return '—';
+  const at = new Date(epoch * 1000);
+  if (span >= 14 * 86400) return at.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const time = at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (at.toDateString() === new Date().toDateString()) return time;
+  const ahead = epoch - Date.now() / 1000;
+  if (ahead > 0 && ahead < 6 * 86400) return `${at.toLocaleDateString([], { weekday: 'short' })} ${time}`;
+  return `${at.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
+}
+
+/** Where a window opened, dated for anything longer than a day so a weekly
+    start never reads like its own reset. */
+function openedText(epoch, span) {
+  if (span >= 2 * 86400) return new Date(epoch * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return momentText(epoch, span);
+}
+
+const times = (m) => !known(m) ? '—' : m >= 10 ? m.toFixed(0) : m < 1 ? m.toFixed(2) : m.toFixed(1);
+const reading = (n) => n.toFixed(Math.abs(n - Math.round(n)) < 0.05 ? 0 : 1);
+
+/** Text with **bold** runs, built as nodes rather than HTML. */
+function rich(tag, className, text) {
+  return el(tag, { class: className }, text.split(/\*\*(.+?)\*\*/).map((part, i) => (i % 2 ? el('b', { text: part }) : part)));
+}
+
+/** Where the average rate so far lands: the moment it runs dry (as a share
+    of the window), or the reading it reaches at the reset. */
+function projection(p) {
+  if (p.status === 'early') return { runsOut: false, outAt: null, end: null };
+  if (p.status === 'exhausted') return { runsOut: true, outAt: p.elapsedFrac, end: 100 };
+  if (known(p.runsOutIn) && p.runsOutIn < p.remaining) {
+    return { runsOut: true, outAt: (p.elapsed + p.runsOutIn) / p.total, end: 100 };
+  }
+  return { runsOut: false, outAt: null, end: p.elapsedFrac > 0 ? Math.min(100, p.used / p.elapsedFrac) : p.used };
+}
+
+function rateShort(perHour, total) {
+  const r = rateParts(perHour, total);
+  return r ? `${r.value}%/${r.unit}` : '—';
+}
+
+/** The one-line answer on the card and the headline inside it. */
+function paceStory(p, resetAt) {
+  const reset = momentText(resetAt, p.total);
+  const proj = projection(p);
+  const rate = rateShort(p.allowedPerHour, p.total);
+  if (p.status === 'exhausted') return {
+    foot: `Out of quota until **${reset}**`,
+    headline: ['Back at ', reset, 'now'],
+    support: `Limit reached. Nothing left for **${duration(p.remaining)}**.`,
+  };
+  if (p.status === 'early') return {
+    foot: 'Too early to judge pace',
+    headline: ['Just getting started'],
+    support: `**${pct(p.used)}** used so far; pace settles once more of the window has passed. Resets ${reset}, in **${duration(p.remaining)}**.`,
+  };
+  if (proj.runsOut) {
+    const outEpoch = Date.now() / 1000 + p.runsOutIn;
+    const today = new Date(outEpoch * 1000).toDateString() === new Date().toDateString() && p.total < 14 * 86400;
+    return {
+      foot: `Runs dry **${duration(p.early)}** before the reset`,
+      headline: [today ? 'Runs out at ' : 'Runs out ', momentText(outEpoch, p.total), p.status === 'on-pace' ? null : 'now'],
+      support: `In **${duration(p.runsOutIn)}**, **${duration(p.early)}** before the ${reset} reset. Stay under **${rate}** to make it.`,
+    };
+  }
+  const spare = 100 - proj.end;
+  if (p.status === 'spare') return {
+    foot: `**${pct(spare)}** will go unused at this rate`,
+    headline: ['', pct(spare), 'ok', ' will go unused'],
+    support: `This rate ends near **${pct(proj.end)}** at the ${reset} reset. Room for **${rate}**.`,
+  };
+  return {
+    foot: spare >= 1 ? `Lasts to the reset with **~${pct(spare)}** to spare` : 'Lasts right up to the reset',
+    headline: ['Lasts until ', 'the reset', 'ok'],
+    support: `This rate ends near **${pct(proj.end)}** at ${reset}. Room for **${rate}**.`,
+  };
+}
+
+function paceTiles(p) {
+  const proj = projection(p);
+  const hot = p.status === 'fast' || p.status === 'ahead';
+  const rate = rateParts(p.allowedPerHour, p.total);
+  const tile = (value, unit, label, tone) => el('div', { class: `wc-tile${tone ? ` is-${tone}` : ''}` }, [
+    el('b', {}, [value, unit && el('small', { text: unit })]),
+    el('span', { text: label }),
+  ]);
+  const pace = p.status === 'early'
+    ? tile('—', null, 'even pace')
+    : tile(times(p.multiplier), '×', 'even pace', hot ? 'hot' : known(p.multiplier) && p.multiplier <= 1 ? 'good' : null);
+  if (p.status === 'exhausted') {
+    const avg = rateParts(p.ratePerHour, p.total);
+    return [pace, tile('0', '%', 'left'), tile(avg ? avg.value : '—', avg && `%/${avg.unit}`, 'average rate')];
+  }
+  const second = p.status === 'early' ? tile('—', null, 'too early to project')
+    : proj.runsOut ? tile(duration(p.runsOutIn), null, 'until empty', hot ? 'hot' : null)
+    : tile(pct(proj.end).replace('%', ''), '%', 'at the reset');
+  return [pace, second, tile(rate ? rate.value : '—', rate && `%/${rate.unit}`, proj.runsOut ? 'rate that lasts' : 'room to last')];
+}
+
+function statusChip(p) {
+  return el('span', { class: 'status-chip', vars: { '--c': SEVERITY[PACE_SEVERITY[p.status]] } }, [
+    iconWithClass(PACE_ICON[p.status], '', 14),
+    PACE_BADGE[p.status],
   ]);
 }
 
-function paceMeter(hue, used, p) {
-  const bar = el('div', { class: 'meter is-plain clock-meter', vars: { '--c': hue } }, [el('i', {})]);
-  bar.querySelector('i').style.width = `${Math.min(100, Math.max(0, used))}%`;
-  if (p && p.status !== 'exhausted') {
-    // Where the fill would be right now at an even pace: the bar is the
-    // reading, the tick is the reset's schedule.
-    const tick = el('b', { class: 'meter-tick', title: `${pct(p.expected)} would be even pace` });
-    tick.style.left = `${Math.min(100, Math.max(0, p.expected))}%`;
-    bar.append(tick);
-  }
-  return bar;
-}
-
-function renderCursorResets(host) {
-  const report = state.cycle;
-  if (!report) return;
-  const end = report.cycle_end ? Date.parse(report.cycle_end) / 1000 : null;
-  const card = el('div', { class: 'card' }, [
-    el('div', { class: 'card-head' }, [
-      el('h2', { text: 'Cursor' }),
-      el('span', { class: 'meta', text: `Dashboard · ${relativeTime(report.fetched_at)}${state.cycleError ? ' · refresh failed' : ''}` }),
+/** Material 3 linear progress, with the even-pace mark and anything past
+    it striped: ahead of schedule reads before a word does. */
+function paceBar(used, p) {
+  const u = Math.min(100, Math.max(0, used));
+  const even = p ? Math.min(100, Math.max(0, p.expected)) : null;
+  const over = known(even) && u > even + 0.5;
+  return el('div', {
+    class: `wbar${u >= 97 ? ' is-full' : ''}`,
+    vars: { '--u': u, '--fill': over ? even : u, '--even': even ?? 0 },
+  }, [
+    el('div', { class: 'wbar-rail' }, [
+      el('i', { class: 'wbar-fill' }),
+      over && el('i', { class: 'wbar-over' }),
+      el('i', { class: 'wbar-rest' }),
+      el('b', { class: 'wbar-stop' }),
     ]),
-    el('div', { class: 'tile-note', text: 'Source: Cursor billing cycle. Pace assumes the reported cycle boundaries.' }),
+    known(even) && el('i', { class: 'wbar-even' }),
+    known(even) && el('span', { class: 'wbar-label', text: `even pace ${pct(even)}` }),
   ]);
-  const rows = [['Billing cycle · overall', report.total_pct], ['Other models', report.api_pct], ['Cursor models', report.auto_pct]];
-  let shown = 0;
-  for (const [label, used] of rows) {
-    if (!known(used)) continue;
-    shown++;
-    const p = cursorPace(report, used);
-    const clock = el('div', { class: 'clock' }, [
-      el('div', {}, [
-        el('div', { class: 'clock-name', text: label }),
-        el('div', { class: 'clock-when', text: resetText(end) }),
-      ]),
-      el('div', { class: 'clock-left', text: `${pct(used, 1)} used` }),
-      paceMeter(PROVIDER_HUE.cursor, used, p),
-    ]);
-    if (p) clock.append(paceRow(p));
-    if (known(end)) clock.append(el('div', { class: 'tile-note', text: `Until reported reset: ${remainingTime(end)}` }));
-    card.append(clock);
+}
+
+let projSeq = 0;
+function projectionChart(p, openedAt, resetAt) {
+  const proj = projection(p);
+  const e = p.elapsedFrac * 100;
+  const u = Math.min(100, Math.max(0, p.used));
+  const fade = `projFade${++projSeq}`;
+  // The plot stretches to any width; strokes, dots and labels stay their
+  // own size because only the lines live in the stretched coordinates.
+  const svg = svgEl('svg', { class: 'proj-svg', viewBox: '0 0 100 100', preserveAspectRatio: 'none', 'aria-hidden': 'true' });
+  const defs = svgEl('defs');
+  const gradient = svgEl('linearGradient', { id: fade, x1: 0, y1: 0, x2: 0, y2: 1 });
+  gradient.append(svgEl('stop', { offset: 0, class: 'proj-fade-top' }), svgEl('stop', { offset: 1, class: 'proj-fade-bottom' }));
+  defs.append(gradient);
+  svg.append(defs);
+  const line = (cls, x1, y1, x2, y2) => svg.append(svgEl('line', { class: cls, x1, y1, x2, y2 }));
+  line('proj-grid is-top', 0, 0, 100, 0);
+  line('proj-grid', 0, 50, 100, 50);
+  line('proj-grid is-base', 0, 100, 100, 100);
+  line('proj-even', 0, 100, 100, 0);
+  svg.append(svgEl('polygon', { class: 'proj-area', points: `0,100 ${e},${100 - u} ${e},100`, fill: `url(#${fade})` }));
+  line('proj-now', e, 100 - u, e, 100);
+  line('proj-used', 0, 100, e, 100 - u);
+  if (proj.runsOut && p.status !== 'exhausted') line('proj-ahead', e, 100 - u, proj.outAt * 100, 0);
+  else if (!proj.runsOut && known(proj.end)) line('proj-ahead', e, 100 - u, 100, 100 - proj.end);
+
+  const plot = el('div', { class: 'proj-plot' }, [svg, el('span', { class: 'proj-cap', text: '100%' })]);
+  if (proj.runsOut) {
+    const out = proj.outAt * 100;
+    plot.prepend(el('div', { class: 'proj-lock', vars: { '--out': out } }));
+    const gap = p.status === 'exhausted' ? p.remaining : p.early;
+    if (100 - out >= 28) plot.append(el('span', { class: 'proj-lock-label', vars: { '--out': out }, text: `out of quota for ${duration(gap)}` }));
+    if (p.status !== 'exhausted') plot.append(el('i', { class: 'proj-dot is-out', vars: { '--x': out, '--y': 0 } }));
+  } else if (known(proj.end)) {
+    plot.append(el('i', { class: 'proj-dot is-end', vars: { '--x': 100, '--y': 100 - proj.end } }));
+    plot.append(el('span', {
+      class: `proj-end${proj.end < 18 ? ' is-above' : ''}`, vars: { '--y': 100 - proj.end }, text: `${pct(proj.end)} at reset`,
+    }));
   }
-  if (!shown) card.append(el('div', { class: 'connection-reason', text: 'Cursor returned no quota percentage for this cycle.' }));
-  host.append(card);
+  plot.append(el('i', { class: 'proj-dot is-now', vars: { '--x': e, '--y': 100 - u } }));
+  plot.append(el('span', { class: `proj-val${e < 22 ? ' is-right' : ''}`, vars: { '--x': e, '--y': 100 - u } }, [
+    `${reading(u)}%`, el('small', { text: 'now' }),
+  ]));
+
+  const key = [['sw-line', 'Average so far'], ['sw-dash', 'At this rate'], ['sw-dot', 'Even pace']];
+  if (proj.runsOut) key.push(['sw-hatch', 'Out of quota']);
+  return el('div', { class: 'proj' }, [
+    plot,
+    el('div', { class: 'proj-axis' }, [
+      el('span', { text: openedText(openedAt, p.total) }),
+      el('span', { text: `reset ${momentText(resetAt, p.total)}` }),
+    ]),
+    el('div', { class: 'proj-legend' }, key.map(([cls, text]) => el('span', {}, [el('i', { class: `sw ${cls}` }), text]))),
+  ]);
+}
+
+/** Chart labels sit beside their points; where two would overlap at the
+    current width, the less important one steps aside (the same figure is
+    in the headline). */
+function settleChartLabels() {
+  for (const plot of document.querySelectorAll('.proj-plot')) {
+    const value = plot.querySelector('.proj-val')?.getBoundingClientRect();
+    const now = plot.querySelector('.proj-dot.is-now')?.getBoundingClientRect();
+    const overlaps = (a, b) => Boolean(b) && a.left < b.right + 4 && a.right > b.left - 4 && a.top < b.bottom + 2 && a.bottom > b.top - 2;
+    for (const label of plot.querySelectorAll('.proj-end, .proj-cap')) {
+      label.hidden = false;
+      const box = label.getBoundingClientRect();
+      // The reset figure also needs clear space after "now", or it sits on the dashed line.
+      const crowded = label.classList.contains('proj-end') && Boolean(now) && box.left < now.right + 8;
+      label.hidden = crowded || overlaps(box, value) || overlaps(box, now);
+    }
+  }
+}
+
+let freshlyOpened = null;
+function toggleWindow(key) {
+  if (state.openWindows.has(key)) state.openWindows.delete(key);
+  else { state.openWindows.add(key); freshlyOpened = key; }
+  renderResets();
+}
+
+/** One window: the stat card, and when opened, the projection below it. */
+function windowCard({ key, name, used, p, openedAt, resetAt, span }) {
+  const live = known(used);
+  const open = Boolean(p) && state.openWindows.has(key);
+  const resetLine = known(resetAt) && resetAt > Date.now() / 1000 ? `Resets ${momentText(resetAt, span)}` : resetText(resetAt);
+  const card = el('article', {
+    class: `wc${open ? ' is-open' : ''}`,
+    'data-key': key,
+    role: p ? 'button' : null,
+    tabindex: p ? 0 : null,
+    'aria-expanded': p ? String(open) : null,
+    onclick: p ? () => toggleWindow(key) : null,
+    onkeydown: p ? (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      toggleWindow(key);
+    } : null,
+  }, [
+    el('div', { class: 'wc-head' }, [
+      el('div', {}, [el('div', { class: 'wc-name', text: name }), el('div', { class: 'wc-when', text: resetLine })]),
+      p && statusChip(p),
+    ]),
+    el('div', { class: 'wc-hero' }, [
+      el('div', {}, [
+        live ? el('div', { class: 'wc-num' }, [reading(used), el('span', { class: 'u', text: '%' })])
+          : el('div', { class: 'wc-num is-small is-muted', text: 'Awaiting update' }),
+        el('div', { class: 'wc-num-label', text: 'used' }),
+      ]),
+      known(resetAt) && el('div', { class: 'is-right' }, [
+        el('div', { class: 'wc-num is-small', text: remainingTime(resetAt) }),
+        el('div', { class: 'wc-num-label', text: 'until reset' }),
+      ]),
+    ]),
+    live && paceBar(used, p),
+  ]);
+  if (!p) return card;
+  const story = paceStory(p, resetAt);
+  card.append(
+    el('div', { class: 'wc-tiles' }, paceTiles(p)),
+    el('div', { class: 'wc-foot' }, [
+      iconWithClass(ICONS.clock, '', 15),
+      rich('span', '', story.foot),
+      el('span', { class: 'wc-more' }, [open ? 'Less' : 'Details', iconWithClass(ICONS.chevron, 'wc-chev', 15)]),
+    ]),
+  );
+  if (open) {
+    const [lead, em, tone, tail] = story.headline;
+    card.append(el('div', { class: `wc-details${freshlyOpened === key ? ' is-fresh' : ''}` }, [
+      el('div', { class: 'proj-headline' }, [lead, em && el('em', { class: tone ? `is-${tone}` : null, text: em }), tail]),
+      rich('div', 'proj-support', story.support),
+      projectionChart(p, openedAt, resetAt),
+    ]));
+  }
+  return card;
+}
+
+// ── session budget ────────────────────────────────────────────────────────
+// How many full 5-hour sessions the rest of the week holds. Providers report
+// the two windows separately and never say how they relate, so the engine
+// measures it: the weekly points that moved alongside each point of 5-hour
+// movement, across this user's own readings.
+
+function budgetFigures(pair, session, week) {
+  const share = pair.share;
+  const perSession = 100 * share;
+  const weeklyLeft = Math.max(0, 100 - week.used_percent);
+  const sessionUsed = session && windowCurrent(session) && known(session.used_percent) ? session.used_percent : null;
+  const room = known(sessionUsed) ? (100 - sessionUsed) * share : null;
+  return {
+    share, perSession, weeklyLeft, sessionUsed, room,
+    perWeek: 1 / share,
+    sessionsLeft: weeklyLeft / perSession,
+    // The 5-hour reading at which the weekly limit would stop this session.
+    stopsAt: known(room) && weeklyLeft < room ? sessionUsed + weeklyLeft / share : null,
+  };
+}
+
+function sessionCells(perWeek, weeklyUsed) {
+  const n = Math.max(1, Math.min(24, Math.round(perWeek)));
+  const each = 100 / n;
+  return el('div', { class: 'budget-cells', role: 'img', 'aria-label': `${pct(weeklyUsed)} of the week used, about ${n} sessions in all` },
+    Array.from({ length: n }, (_, i) => el('i', { vars: { '--f': Math.min(1, Math.max(0, weeklyUsed / each - i)) } }, [el('b')])));
+}
+
+function surfaceShares(breakdown) {
+  const rows = (breakdown?.rows || []).filter(r => r.percent > 0);
+  if (!rows.length) return null;
+  const tones = ['var(--c)', 'var(--brand-6)', 'var(--brand-5)', 'var(--ink-3)'];
+  return el('div', { class: 'budget-surfaces' }, [
+    el('span', { class: 'kicker', text: 'This week by surface' }),
+    el('div', { class: 'budget-surface-bar' }, rows.map((r, i) => el('i', { vars: { '--w': r.percent, '--tone': tones[i % tones.length] } }))),
+    el('div', { class: 'proj-legend' }, rows.map((r, i) => el('span', {}, [
+      el('i', { class: 'sw budget-swatch', vars: { '--tone': tones[i % tones.length] } }), `${r.name} ${pct(r.percent)}`]))),
+  ]);
+}
+
+function budgetCard(provider, label) {
+  const pair = (provider.budget || []).find(b => b.status !== 'unrelated');
+  if (!pair) return null;
+  const session = provider.windows.find(w => w.id === pair.session);
+  const week = provider.windows.find(w => w.id === pair.weekly);
+  if (!week || !windowCurrent(week) || !known(week.used_percent)) return null;
+  const reset = momentText(week.resets_at, 7 * 86400);
+  const measured = pair.status === 'measured' && pair.share > 0;
+  const card = el('article', { class: 'wc budget' }, [
+    el('div', { class: 'wc-head' }, [
+      el('div', {}, [
+        el('div', { class: 'wc-name', text: 'Your week in 5-hour sessions' }),
+        el('div', { class: 'wc-when', text: `${week.label} limit · resets ${reset}` }),
+      ]),
+      el('span', { class: 'status-chip', vars: { '--c': measured ? 'var(--ok)' : 'var(--off)' } }, [
+        iconWithClass(measured ? ICONS.check : ICONS.clock, '', 14), measured ? 'Measured' : 'Measuring']),
+    ]),
+  ]);
+  if (measured) {
+    const f = budgetFigures(pair, session, week);
+    const left = f.sessionsLeft < 10 ? f.sessionsLeft.toFixed(1) : String(Math.round(f.sessionsLeft));
+    const per = pct(f.perSession, f.perSession < 10 ? 1 : 0);
+    card.append(
+      el('div', { class: 'wc-hero' }, [
+        el('div', {}, [el('div', { class: 'wc-num', text: left }), el('div', { class: 'wc-num-label', text: `full sessions left before ${reset}` })]),
+        el('div', { class: 'is-right' }, [el('div', { class: 'wc-num is-small', text: `≈ ${Math.round(f.perWeek)}` }), el('div', { class: 'wc-num-label', text: 'sessions a week' })]),
+      ]),
+      sessionCells(f.perWeek, week.used_percent),
+      rich('div', 'budget-line', `One full 5-hour session uses about **${per}** of the week, and **${pct(f.weeklyLeft)}** of it is left.`),
+      known(f.stopsAt)
+        ? rich('div', 'budget-line is-warn', `The weekly limit will stop this session at about **${pct(f.stopsAt)}**, before its own 5-hour limit.`)
+        : known(f.room) ? rich('div', 'budget-line', `Using the rest of this session (now ${pct(f.sessionUsed)}) would take about **${pct(f.room)}** of the week.`) : null,
+      el('div', { class: 'wc-tiles' }, [
+        el('div', { class: 'wc-tile' }, [el('b', {}, [per.replace('%', ''), el('small', { text: '%' })]), el('span', { text: 'of the week per session' })]),
+        el('div', { class: `wc-tile${known(f.stopsAt) ? ' is-hot' : ''}` }, [el('b', { text: left }), el('span', { text: 'sessions left' })]),
+        el('div', { class: 'wc-tile' }, [el('b', { text: remainingTime(week.resets_at) }), el('span', { text: 'until the week resets' })]),
+      ]),
+    );
+  } else {
+    const progress = Math.min(1, pair.session_points / pair.needed_session_points, pair.weekly_points / pair.needed_weekly_points);
+    card.append(
+      el('div', { class: 'budget-line', text: `Learning how much of the week one 5-hour session uses. ${label} reports the two limits separately and never says how they relate, so this is measured from your own readings as they come in.` }),
+      el('div', { class: 'meter budget-progress', vars: { '--w': progress * 100 } }, [el('i', { class: 'sess-context-fill' })]),
+      el('div', { class: 'wc-when', text: `${compact(pair.session_points)} of ${compact(pair.needed_session_points)} points of 5-hour movement seen · the weekly window moved ${compact(pair.weekly_points)} of the ${compact(pair.needed_weekly_points)} points needed` }),
+    );
+  }
+  const surfaces = surfaceShares(provider.breakdown);
+  if (surfaces) card.append(surfaces);
+  if (measured) card.append(el('div', { class: 'sess-notes' }, [el('p', {
+    text: `Measured from your own usage: ${compact(pair.session_points)} points of 5-hour movement and the ${compact(pair.weekly_points)} weekly points that moved with them${pair.cycles > 1 ? `, across ${pair.cycles} weeks` : ''}. Readings are whole percentages, so treat it as approximate.`,
+  })]));
+  return card;
+}
+
+function providerSection({ id, label, live, meta, warning, onRefresh, cards, note, lead }) {
+  const actions = el('div', { class: 'prov-actions' }, [
+    warning && withTooltip(el('span', { class: 'prov-flag', tabindex: 0, text: 'Cached reading' }), () => [el('div', { text: warning })]),
+    el('button', { class: 'icon-btn prov-refresh', type: 'button', title: 'Refresh usage', 'aria-label': `Refresh ${label} usage`, onclick: onRefresh }, [icon(ICONS.refresh, 16)]),
+  ]);
+  return el('section', { class: 'prov', vars: { '--c': PROVIDER_HUE[id] } }, [
+    el('div', { class: 'prov-head' }, [
+      el('div', { class: 'prov-mark' }, [icon(PROVIDER_GLYPH[id], 18)]),
+      el('div', { class: 'prov-title' }, [
+        el('h2', { text: label }),
+        el('div', { class: 'prov-sub' }, [el('i', { class: `prov-live${live ? ' is-on' : ''}` }), el('span', { text: meta })]),
+      ]),
+      actions,
+    ]),
+    note,
+    lead,
+    cards.length > 0 && el('div', { class: 'prov-grid' }, cards),
+  ]);
+}
+
+function cursorSection() {
+  const report = state.cycle;
+  if (!report) return null;
+  const start = report.cycle_start ? Date.parse(report.cycle_start) / 1000 : null;
+  const end = report.cycle_end ? Date.parse(report.cycle_end) / 1000 : null;
+  const span = known(start) && known(end) ? end - start : 30 * 86400;
+  const cards = [['total', 'Billing cycle', report.total_pct], ['api', 'Other models', report.api_pct], ['auto', 'Cursor models', report.auto_pct]]
+    .filter(([, , used]) => known(used))
+    .map(([pool, name, used]) => windowCard({
+      key: `cursor:${pool}`, name, used, p: cursorPace(report, used), openedAt: start, resetAt: end, span,
+    }));
+  return providerSection({
+    id: 'cursor', label: 'Cursor', live: !state.cycleError,
+    meta: `Dashboard · ${relativeTime(report.fetched_at)}${state.cycleError ? ' · refresh failed' : ''}`,
+    onRefresh: () => refreshCycle(true),
+    cards,
+    note: cards.length ? null : el('div', { class: 'wc is-note', text: 'Cursor returned no quota percentage for this cycle.' }),
+  });
 }
 
 function renderResets() {
   const host = $('resetCards');
+  const focused = document.activeElement?.closest?.('#resetCards [data-key]')?.dataset.key;
   host.replaceChildren();
-  $('resetsNow').textContent = new Date().toLocaleTimeString();
-  for (const [id,label] of [['claude','Claude'],['codex','Codex']]) {
+  $('resetsNow').textContent = `Updated ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`;
+  for (const [id, label] of [['claude', 'Claude'], ['codex', 'Codex']]) {
     const provider = state.providers?.providers?.find(p => p.id === id);
     const current = providerCurrent(provider);
-    const card = el('div',{class:'card'},[
-      el('div',{class:'card-head'},[
-        el('h2',{text:label}),
-        el('span',{class:'meta',text:current ? `Connected · checked ${relativeTime(provider.fetched_at)}` : 'Unavailable'}),
-      ]),
-    ]);
-    if (!current || !provider.windows?.length) {
-      const reason = state.providersError || provider?.reason || (provider ? 'No current provider snapshot available.' : 'Waiting for provider data.');
-      card.append(el('div',{class:'connection-reason',text:reason.replace('Open Claude Code to reconnect.', 'Use Reconnect Claude below.')}));
-    } else {
-      card.append(el('div',{class:'tile-note',text:`Source: ${label} account usage`}));
-      if (provider.warning) card.append(el('div',{class:'tile-note',text:`${provider.warning} Showing the reading from ${relativeTime(provider.fetched_at)}.`}));
-      for (const window of provider.windows) {
-        const clock = el('div',{class:'clock'},[
-          el('div',{},[
-            el('div',{class:'clock-name',text:window.label}),
-            el('div',{class:'clock-when',text:resetText(window.resets_at)}),
-          ]),
-          el('div',{class:'clock-left',text:windowCurrent(window) && known(window.used_percent) ? `${pct(window.used_percent,1)} used` : 'Awaiting update'}),
-        ]);
-        if (windowCurrent(window) && known(window.used_percent)) {
-          const p = windowPace(window);
-          clock.append(paceMeter(PROVIDER_HUE[id], window.used_percent, p));
-          if (p) clock.append(paceRow(p));
-        }
-        if (known(window.resets_at)) clock.append(el('div',{class:'tile-note',text:`Until reported reset: ${remainingTime(window.resets_at)}`}));
-        card.append(clock);
-      }
+    const link = state.links[id] || {};
+    const cards = current ? (provider.windows || []).map((window) => {
+      const live = windowCurrent(window) && known(window.used_percent);
+      const span = known(window.window_minutes) ? window.window_minutes * 60 : null;
+      return windowCard({
+        key: `${id}:${window.id || window.label}`,
+        name: window.label,
+        used: live ? window.used_percent : null,
+        p: live ? windowPace(window) : null,
+        openedAt: known(span) && known(window.resets_at) ? window.resets_at - span : null,
+        resetAt: window.resets_at,
+        span,
+      });
+    }) : [];
+    let note = null;
+    if (!cards.length || link.status === 'error' || link.status === 'connecting') {
+      const reason = cards.length ? null : state.providersError || provider?.reason || (provider ? 'No current provider snapshot available.' : 'Waiting for provider data.');
+      note = el('div', { class: 'wc is-note' }, [
+        reason && el('div', { class: 'connection-reason', text: reason.replace('Open Claude Code to reconnect.', `Use Reconnect ${label} below.`) }),
+        connectionControls(id, label, current),
+      ]);
     }
-    card.append(connectionControls(id,label,current));
-    host.append(card);
+    host.append(providerSection({
+      id, label, live: current,
+      meta: current ? `Connected · checked ${relativeTime(provider.fetched_at)}` : 'Unavailable',
+      warning: current && provider.warning ? `${provider.warning} Showing the reading from ${relativeTime(provider.fetched_at)}.` : null,
+      onRefresh: () => refreshProviders(true),
+      cards, note,
+      lead: current ? budgetCard(provider, label) : null,
+    }));
   }
-  renderCursorResets(host);
+  const cursor = cursorSection();
+  if (cursor) host.append(cursor);
+  freshlyOpened = null;
+  settleChartLabels();
+  if (focused) host.querySelector(`[data-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
 }
 
 // ── chrome ────────────────────────────────────────────────────────────────
@@ -1194,23 +1934,17 @@ async function boot() {
     const applied = await window.hud.setAlwaysOnTop(next);
     $('btnPin').setAttribute('aria-pressed', String(applied));
   });
-  $('chatSelect').addEventListener('change', (e) => {
-    // Picking a specific chat is itself an override: it locks Auto onto
-    // whichever provider it just found, so the pin means what it says.
-    if (state.sessionProvider === 'auto') state.sessionProvider = effectiveProvider();
-    state.pinned = e.target.value;
-    state.local = {available:false,reason:'Loading selected session…'};
-    renderChat();
-    saveSessionChoice();
-    refreshLocal();
-  });
-  $('btnUnpin').addEventListener('click', () => {
+  // Leaving a pin or changing follow mode keeps the list on screen and
+  // clears only the selection while the engine finds the new one.
+  const findSession = () => {
     state.pinned = null;
-    state.local = {available:false,reason:'Finding session…'};
-    renderChat();
+    state.sessionOpen = true;
+    if (state.local) state.local = {...state.local, chat: null, reason: 'Finding session…'};
     saveSessionChoice();
+    renderChat();
     refreshLocal();
-  });
+  };
+  $('btnUnpin').addEventListener('click', findSession);
   try {
     const saved = JSON.parse(localStorage.getItem('sessionChoice') || '{}');
     if (['auto','codex','claude','cursor'].includes(saved.provider)) state.sessionProvider = saved.provider;
@@ -1221,26 +1955,28 @@ async function boot() {
   // reports its own open session through the status line on any platform.
   state.activeChatSupported = platform === 'win32';
   if (!state.activeChatSupported && state.sessionProvider === 'codex') state.sessionFollow = 'latest';
-  $('sessionFollow').value = state.sessionFollow;
-  $('sessionFollow').addEventListener('change', event => {
-    state.sessionFollow = event.target.value;
-    state.pinned = null;
-    state.local = {available:false,reason:'Finding session…'};
-    saveSessionChoice();
-    renderChat();
-    refreshLocal();
-  });
-  $('sessionProvider').value = state.sessionProvider;
-  $('sessionProvider').addEventListener('change', event => {
-    state.sessionProvider = event.target.value;
-    state.pinned = null;
-    state.local = null;
-    state.autoDetected = null;
-    state.autoActive = false;
-    saveSessionChoice();
-    renderChat();
-    refreshLocal();
-  });
+  for (const chip of document.querySelectorAll('#sessionFollowRow [data-follow]')) {
+    chip.addEventListener('click', () => {
+      state.sessionFollow = chip.dataset.follow;
+      findSession();
+    });
+  }
+  for (const chip of document.querySelectorAll('#sessionProviders [data-provider]')) {
+    chip.addEventListener('click', () => {
+      if (chip.dataset.provider === state.sessionProvider && !state.pinned) return;
+      state.sessionProvider = chip.dataset.provider;
+      state.pinned = null;
+      state.local = null;
+      state.autoDetected = null;
+      state.autoActive = false;
+      state.sessionOpen = true;
+      state.sessionRows = SESSION_ROWS;
+      saveSessionChoice();
+      renderChat();
+      refreshLocal();
+    });
+  }
+  renderChat();
   $('btnTestBuzz').addEventListener('click', () => window.hud.previewResetAlert());
   $('btnDismissAlert').addEventListener('click', () => window.hud.dismissResetAlert());
   $('resetAlert').addEventListener('cancel', event => { event.preventDefault(); window.hud.dismissResetAlert(); });
@@ -1280,6 +2016,7 @@ async function boot() {
   showSmsStatus(await window.hud.smsStatus());
   showResetAlert(await window.hud.resetAlertStatus());
   window.addEventListener('resize', positionThumb);
+  window.addEventListener('resize', settleChartLabels);
   window.addEventListener('focus', () => refreshProviders(false));
   for (const link of Object.values(await window.hud.providerLinkStatus())) handleLinkState(link);
 
