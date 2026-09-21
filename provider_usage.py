@@ -156,9 +156,39 @@ def normalize_claude(payload, fetched_at=None):
             "resets_at": _timestamp(raw.get("resets_at")),
             "window_minutes": minutes,
         })
-    return _provider("claude", CLAUDE_SOURCE, windows,
-                     None if windows else "No quota percentage returned for this account.",
-                     fetched_at if fetched_at is not None else time.time())
+    # Newer responses also list every limit, including weekly caps scoped to
+    # one model that have no seven_day_* key of their own.
+    listed = payload.get("limits")
+    for raw in listed if isinstance(listed, list) else []:
+        if not isinstance(raw, dict) or raw.get("kind") != "weekly_scoped":
+            continue
+        scope = raw.get("scope") if isinstance(raw.get("scope"), dict) else {}
+        named = [part.get("display_name") for part in (scope.get("model"), scope.get("surface"))
+                 if isinstance(part, dict) and isinstance(part.get("display_name"), str)]
+        used = _percent(raw.get("percent"))
+        if not named or not named[0].strip() or used is None:
+            continue
+        name = named[0].strip()
+        if any(w["id"] == f"seven_day_{name.lower()}" for w in windows):
+            continue
+        windows.append({
+            "id": f"weekly_scoped:{name.lower().replace(' ', '_')}", "label": f"Weekly ({name} only)",
+            "used_percent": used, "resets_at": _timestamp(raw.get("resets_at")),
+            "window_minutes": 10080,
+        })
+    result = _provider("claude", CLAUDE_SOURCE, windows,
+                       None if windows else "No quota percentage returned for this account.",
+                       fetched_at if fetched_at is not None else time.time())
+    # Where this week's usage went, by surface, as Claude reports it.
+    breakdown = payload.get("seven_day_breakdown")
+    rows = breakdown.get("rows") if isinstance(breakdown, dict) else None
+    if isinstance(rows, list):
+        shares = [{"name": row["display_name"], "percent": _percent(row.get("percent"))}
+                  for row in rows if isinstance(row, dict) and isinstance(row.get("display_name"), str)]
+        shares = [row for row in shares if row["percent"] is not None]
+        if shares:
+            result["breakdown"] = {"as_of": _timestamp(breakdown.get("as_of")), "rows": shares}
+    return result
 
 
 def _codex_command():

@@ -78,6 +78,33 @@ class NormalizeClaudeTest(unittest.TestCase):
         self.assertEqual(result["windows"][0]["resets_at"], 1789884000)
         self.assertEqual(result["windows"][2]["label"], "Weekly (sonnet)")
 
+    def test_model_scoped_weekly_caps_and_the_surface_breakdown_are_read(self):
+        reset = "2026-09-22T10:59:59.554149+00:00"
+        result = pu.normalize_claude({
+            "five_hour": {"utilization": 11.0, "resets_at": reset},
+            "seven_day": {"utilization": 81.0, "resets_at": reset},
+            "seven_day_sonnet": {"utilization": 5, "resets_at": reset},
+            "limits": [
+                {"kind": "session", "percent": 11, "resets_at": reset, "scope": None},
+                {"kind": "weekly_all", "percent": 81, "resets_at": reset, "scope": None},
+                {"kind": "weekly_scoped", "percent": 38, "resets_at": reset,
+                 "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None}},
+                # Already reported under its own seven_day_* key: not added twice.
+                {"kind": "weekly_scoped", "percent": 5, "resets_at": reset,
+                 "scope": {"model": {"display_name": "Sonnet"}}},
+                {"kind": "weekly_scoped", "percent": None, "scope": {"model": {"display_name": "Mystery"}}},
+            ],
+            "seven_day_breakdown": {"as_of": "2026-09-21T05:41:07Z", "rows": [
+                {"key": "claude_code", "display_name": "Claude Code", "percent": 98},
+                {"key": "cowork", "display_name": "Cowork", "percent": 2},
+                {"key": "broken", "display_name": "Broken", "percent": "n/a"}]},
+        }, fetched_at=1)
+        self.assertEqual([w["label"] for w in result["windows"]],
+                         ["5-hour", "Weekly", "Weekly (sonnet)", "Weekly (Fable only)"])
+        fable = result["windows"][3]
+        self.assertEqual((fable["id"], fable["used_percent"], fable["window_minutes"]), ("weekly_scoped:fable", 38, 10080))
+        self.assertEqual(result["breakdown"]["rows"], [{"name": "Claude Code", "percent": 98}, {"name": "Cowork", "percent": 2}])
+
     def test_missing_percentage_is_not_zero(self):
         for raw in ({}, {"utilization": None}, {"utilization": "0"}, {"utilization": True}):
             self.assertEqual(pu.normalize_claude({"five_hour": raw})["windows"], [])

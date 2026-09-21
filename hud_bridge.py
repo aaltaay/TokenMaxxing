@@ -24,6 +24,7 @@ import cursor_usage as cu
 import reset_schedule as rs
 import provider_usage as pu
 import reset_alerts
+import session_budget
 import session_usage
 
 PROTOCOL_VERSION = 1
@@ -196,7 +197,9 @@ def _attention(report: dict) -> list[dict]:
 
 
 def cmd_providers(force: bool = False) -> dict:
-    return pu.get_provider_usage(force=force)
+    # Each fresh reading also feeds the measured share of a week that one
+    # 5-hour session uses; the provider reports the two windows separately.
+    return session_budget.attach(pu.get_provider_usage(force=force))
 
 
 def cmd_resets(now: str | None = None) -> dict:
