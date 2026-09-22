@@ -40,6 +40,12 @@ const state = {
   view: 'overview',
   // Limits cards the user has opened, kept across the clock re-renders.
   openWindows: new Set(),
+  // Overview detail: compact rings, or every provider spelled out.
+  overviewMode: 'compact',
+  // What the bell badge reflects besides alerts: a waiting update and the
+  // engine's own status.
+  update: null,
+  statusKind: 'off',
   // Sessions list: whether the followed session is open, which of its
   // priciest requests is broken down, and how many rows are shown.
   sessionOpen: true,
@@ -350,330 +356,383 @@ function arcPath(cx, cy, r, sweep) {
   return `M${x1.toFixed(2)} ${y1.toFixed(2)} A${r} ${r} 0 ${sweep > 180 ? 1 : 0} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}`;
 }
 
-function renderDial() {
-  const group = $('dialRings');
-  const dial = $('dial');
-  group.replaceChildren();
+// ── overview ──────────────────────────────────────────────────────────────
+// Compact by default: one ring per provider for the window that is live now,
+// every other window and pool as a bar beneath it, and a line saying where
+// there is room to work. Expanded keeps those rings and adds each provider's
+// verdict in full, the watch list, and the cycle's own figures.
 
-  const bands = providerBands();
-  if (!bands.length) {
-    $('dialValue').textContent = '—';
-    $('dialLabel').textContent = state.cycleError ? 'no data' : 'included usage';
-    return;
-  }
+const OVERVIEW_RING = { compact: 92, expanded: 104 };
 
-  bands.forEach((band, i) => {
-    const r = DIAL.outer - i * DIAL.step;
-    const circumference = 2 * Math.PI * r;
-    const hasValue = known(band.value);
-    const value = hasValue ? Math.max(0, Math.min(100, band.value)) : 0;
-    const isPool = band.kind === 'pool';
-    const width = isPool ? DIAL.poolWidth : DIAL.windowWidth;
-    const focused = state.focus === band.id;
-
-    group.append(svgEl('circle', {
-      cx: DIAL.cx, cy: DIAL.cy, r,
-      class: 'dial-track',
-      'stroke-width': width,
-      // A just-reset window draws almost no arc, so its track has to be
-      // visible enough that the provider still reads as present on the dial.
-      stroke: `color-mix(in srgb, ${band.hue} ${isPool ? 20 : 34}%, transparent)`,
-      'stroke-dasharray': isPool ? null : '2 4',
-      'stroke-linecap': isPool ? 'butt' : 'round',
-    }));
-
-    if (!hasValue) return;
-    const maxxed = isPool && value >= 100;
-    const cls = `dial-arc${focused ? ' is-focus' : ''}${maxxed ? ' is-maxxed' : ''}`;
-    if (isPool) {
-      // At a full band the two round caps overlap and bulge, so close the ring.
-      const arc = svgEl('circle', {
-        cx: DIAL.cx, cy: DIAL.cy, r,
-        class: cls,
-        'stroke-width': width,
-        stroke: band.hue,
-        'stroke-linecap': maxxed ? 'butt' : 'round',
-        'stroke-dasharray': maxxed ? null : `${Math.max((circumference * value) / 100, value > 0 ? 3 : 0)} ${circumference}`,
-        transform: `rotate(-90 ${DIAL.cx} ${DIAL.cy})`,
-      });
-      if (maxxed) arc.style.setProperty('--glow', band.hue);
-      group.append(arc);
-    } else if (value > 0.5) {
-      // Dashed texture is the secondary encoding that keeps a time window from
-      // reading as a consumption percentage.
-      group.append(svgEl('path', {
-        class: cls,
-        d: arcPath(DIAL.cx, DIAL.cy, r, Math.min(359.9, (value * 360) / 100)),
-        fill: 'none',
-        stroke: band.hue,
-        'stroke-width': width,
-        'stroke-linecap': 'round',
-        'stroke-dasharray': '2 4',
-      }));
-    }
-  });
-
-  dial.classList.toggle('has-focus', Boolean(state.focus));
-  const total = state.cycle?.total_pct;
-  const value = $('dialValue');
-  value.textContent = pct(total);
-  value.classList.toggle('is-maxxed', total >= 100);
-  value.style.setProperty('--c', PROVIDER_HUE.cursor);
-  $('dialLabel').textContent = 'Cursor used';
+function overviewMode() {
+  return state.overviewMode === 'expanded' ? 'expanded' : 'compact';
 }
 
-/** A miniature of the dial with band `index` lit — the legend's key. */
-function bandGlyph(count, index, hue, kind) {
-  const svg = svgEl('svg', { class: 'legend-glyph', width: 15, height: 15, viewBox: '0 0 15 15', 'aria-hidden': 'true' });
-  for (let i = 0; i < count; i += 1) {
-    const on = i === index;
+function setOverviewMode(mode) {
+  state.overviewMode = mode;
+  try { localStorage.setItem('overviewMode', mode); } catch { /* preference is optional */ }
+  paintOverview();
+}
+
+/** The Cursor billing cycle and its pools, reduced to what the overview needs. */
+function cursorSummary() {
+  const report = state.cycle;
+  const end = report?.cycle_end ? Date.parse(report.cycle_end) / 1000 : null;
+  const used = report?.total_pct;
+  const p = known(used) ? cursorPace(report, used) : null;
+  const meters = report?.meters || [];
+  return {
+    id: 'cursor', label: 'Cursor', hue: PROVIDER_HUE.cursor,
+    note: `${report?.plan ? `${report.plan} · ` : ''}monthly cycle`,
+    ring: { value: used, label: 'cycle' },
+    pace: p, resetAt: end, span: p?.total ?? 30 * 86400,
+    bars: meters.map(meter => ({
+      name: meter.label, value: meter.pct, even: p?.expected,
+      maxxed: meter.status === 'maxxed' || meter.pct >= 100,
+    })),
+    foot: [
+      known(report?.total_spend_cents)
+        ? `${money(report.total_spend_cents, 0)}${known(report.burn_cents_per_day) ? ` · ${money(report.burn_cents_per_day, 0)} / day` : ''}`
+        : null,
+      known(end) ? `Resets ${momentText(end, 30 * 86400)}` : null,
+    ],
+    unavailable: report ? null : (state.cycleError || 'Waiting for the Cursor dashboard.'),
+    onOpen: openDashboard,
+  };
+}
+
+/** Claude or Codex: the live window in the ring, the rest as bars. */
+function accountSummary(id, label) {
+  const provider = state.providers?.providers?.find(p => p.id === id);
+  const current = providerCurrent(provider);
+  const windows = current ? (provider.windows || []).filter(w => windowCurrent(w) && known(w.used_percent)) : [];
+  const ringWindow = windows[0];
+  const p = ringWindow ? windowPace(ringWindow) : null;
+  const rest = windows.slice(1);
+  const bars = (rest.length ? rest : ringWindow ? [ringWindow] : []).map((window) => {
+    const wp = windowPace(window);
+    return {
+      name: rest.length ? window.label : `${window.label} · against even pace`,
+      value: window.used_percent, even: wp?.expected, maxxed: window.used_percent >= 100,
+    };
+  });
+  const budget = (provider?.budget || []).find(b => b.status === 'measured' && b.share > 0);
+  const week = budget && provider.windows.find(w => w.id === budget.weekly);
+  const sessionsLeft = budget && week && known(week.used_percent)
+    ? Math.max(0, 100 - week.used_percent) / (100 * budget.share) : null;
+  const rate = p ? rateParts(p.allowedPerHour, p.total) : null;
+  return {
+    id, label, hue: PROVIDER_HUE[id],
+    note: windows.length > 1 ? windows.map(w => w.label.replace(' (', ' · ').replace(')', '')).join(' + ') : ringWindow?.label || '',
+    ring: { value: ringWindow?.used_percent, label: ringWindow?.label?.toLowerCase() },
+    pace: p, resetAt: ringWindow?.resets_at, span: p?.total ?? 300 * 60,
+    bars,
+    foot: [
+      known(sessionsLeft) ? `≈ ${sessionsLeft < 10 ? sessionsLeft.toFixed(1) : Math.round(sessionsLeft)} sessions left this week`
+        : rate ? `${rate.value}%/${rate.unit} would last` : null,
+      known(ringWindow?.resets_at) ? `Resets ${momentText(ringWindow.resets_at, p?.total ?? 300 * 60)}` : null,
+    ],
+    unavailable: current && ringWindow ? null
+      : (state.providersError || provider?.reason || `Waiting for ${label} usage.`),
+    onOpen: () => selectView('resets'),
+  };
+}
+
+/** How long this provider's quota lasts at the current rate: the soonest of
+    its windows to run dry, or to reset if none will. */
+function summaryRunway(summary) {
+  const p = summary.pace;
+  const ring = !p ? null
+    : (summary.ring.value ?? 0) >= 100 ? 0
+    : known(p.runsOutIn) && p.runsOutIn < p.remaining ? p.runsOutIn
+    : p.remaining;
+  const spent = summary.bars.some(bar => bar.maxxed) ? 0 : null;
+  const both = [ring, spent].filter(known);
+  // Named apart from summary.ring, which is the figure in the circle.
+  return { ringRunway: ring, runway: both.length ? Math.min(...both) : null };
+}
+
+function overviewSummaries() {
+  return [cursorSummary(), accountSummary('claude', 'Claude'), accountSummary('codex', 'Codex')]
+    .map(summary => ({ ...summary, ...summaryRunway(summary) }));
+}
+
+/** One line: where there is room, and what is about to bite. */
+function overviewAdvice(summaries) {
+  const live = summaries.filter(s => !s.unavailable && known(s.ring.value));
+  if (!live.length) return [el('span', { text: 'Waiting for the first usage reading.' })];
+  const ranked = [...live].sort((a, b) => (a.ring.value - b.ring.value)
+    || ((a.resetAt ?? Infinity) - (b.resetAt ?? Infinity)));
+  const best = ranked[0];
+  const sentences = [];
+  if (best.ring.value >= 100) {
+    sentences.push(['Every provider is at its ceiling — ', el('b', { class: 'is-warn', text: best.label }),
+      ` comes back first, ${momentText(best.resetAt, best.span)}.`]);
+  } else {
+    const sessions = best.foot[0] && best.foot[0].startsWith('≈') ? best.foot[0].slice(2) : null;
+    sentences.push(['Work on ', el('b', { class: 'is-ok', text: best.label }), ' — ',
+      el('b', { text: sessions ? sessions.split(' ')[0] : pct(100 - best.ring.value) }),
+      sessions ? ` ${sessions.split(' ').slice(1).join(' ')}.` : ` of its ${best.ring.label} window is unused.`]);
+  }
+  for (const other of ranked.filter(s => s !== best && known(s.ringRunway) && s.ringRunway < 3 * 3600)) {
+    sentences.push([el('b', { class: 'is-warn', text: other.label }),
+      other.ringRunway <= 0 ? ' is out.' : ` runs out in ${duration(other.ringRunway)}.`]);
+  }
+  // A spent pool is only worth saying when it is not already the headline.
+  const spent = live.filter(s => s !== best).flatMap(s => s.bars.filter(b => b.maxxed).map(b => ({ s, b })));
+  if (spent.length) {
+    sentences.push([`${spent.map(({ b }) => b.name).join(' and ')} spent until ${momentText(spent[0].s.resetAt, spent[0].s.span)}.`]);
+  }
+  return sentences.flatMap((parts, i) => (i ? [' ', ...parts] : parts));
+}
+
+function ringFigure(value, label, size, maxxed) {
+  const radius = size / 2 - 7;
+  const circumference = 2 * Math.PI * radius;
+  const svg = svgEl('svg', { width: size, height: size, viewBox: `0 0 ${size} ${size}`, 'aria-hidden': 'true' });
+  svg.append(svgEl('circle', { cx: size / 2, cy: size / 2, r: radius, class: 'ov-ring-track', 'stroke-width': 10 }));
+  if (known(value)) {
     svg.append(svgEl('circle', {
-      cx: 7.5, cy: 7.5, r: 6.3 - i * 2.3,
-      fill: 'none',
-      'stroke-width': on ? 2 : 1.4,
-      stroke: on ? hue : 'var(--ink-4)',
-      'stroke-dasharray': on && kind === 'window' ? '1 1.6' : null,
-      opacity: on ? 1 : 0.3,
+      cx: size / 2, cy: size / 2, r: radius, 'stroke-width': 10,
+      class: `ov-ring-arc${maxxed ? ' is-maxxed' : ''}`,
+      'stroke-dasharray': `${Math.max(0, (circumference * Math.min(100, Math.max(0, value))) / 100 - 0.1)} ${circumference}`,
     }));
   }
-  return svg;
+  return el('div', { class: 'ov-ring' }, [
+    svg,
+    el('div', { class: 'ov-ring-mid' }, [
+      known(value) ? el('b', {}, [reading(Math.min(999, value)), el('small', { text: '%' })]) : el('b', { class: 'is-off', text: '—' }),
+      el('span', { text: label || '' }),
+    ]),
+  ]);
 }
 
-function renderLegend() {
-  const legend = $('legend');
-  legend.replaceChildren();
-
-  const bands = providerBands();
-  if (!bands.length) {
-    legend.append(el('div', {
-      class: 'empty',
-      text: state.cycleError || 'Waiting for the first usage fetch…',
-    }));
-    return;
-  }
-
-  bands.forEach((band, i) => {
-    const row = el('button', {
-      class: `legend-row${band.kind === 'window' ? ' is-window' : ''}`,
-      type: 'button',
-      onmouseenter: () => { state.focus = band.id; renderDial(); },
-      onmouseleave: () => { state.focus = null; renderDial(); },
-      onclick: () => (band.id === 'cursor' ? openDashboard() : selectView('resets')),
-    }, [
-      bandGlyph(bands.length, i, band.hue, band.kind),
-      el('span', {}, [
-        el('div', { class: 'legend-name', text: band.label }),
-        el('div', { class: 'legend-hint', text: band.hint }),
-      ]),
-      el('span', { class: 'legend-pct', text: band.display }),
-    ]);
-    withTooltip(row, () => [
-      el('b', { text: `${band.label} — ${band.display}` }),
-      el('div', { class: 'muted', text: band.tip }),
-    ]);
-    legend.append(row);
-    if (band.id !== 'cursor' && !known(band.value)) legend.append(connectionControls(band.id, band.label, false));
+function overviewChip(summary) {
+  if (summary.unavailable) return el('span', { class: 'ov-chip', vars: { '--s': 'var(--off)' }, text: 'Unavailable' });
+  const p = summary.pace;
+  if (!p) return null;
+  const hot = p.status === 'fast' || p.status === 'ahead';
+  return el('span', {
+    class: 'ov-chip', vars: { '--s': SEVERITY[PACE_SEVERITY[p.status]] },
+    text: hot ? `${times(p.multiplier)}× pace` : PACE_BADGE[p.status].toLowerCase(),
   });
-
-  renderPools();
 }
 
-/** Cursor's individual pools, below the dial as thin linear meters. */
-function renderPools() {
-  const host = $('pools');
-  host.replaceChildren();
-  const meters = state.cycle?.meters || [];
-  if (!meters.length) return;
+function overviewWhen(summary) {
+  if (summary.unavailable) return summary.unavailable;
+  const p = summary.pace;
+  const reset = known(summary.resetAt) ? `resets ${momentText(summary.resetAt, summary.span)}` : 'reset time unavailable';
+  if (p && projection(p).runsOut && p.status !== 'exhausted') return `dry in ${duration(p.runsOutIn)} · ${reset}`;
+  if (p && p.status === 'exhausted') return `out · ${reset}`;
+  return `${remainingTime(summary.resetAt)} left · ${reset}`;
+}
 
-  for (const meter of meters) {
-    const maxxed = meter.status === 'maxxed';
-    const row = el('div', { class: `pool${maxxed ? ' is-maxxed' : ''}` }, [
-      el('span', { class: 'pool-name', text: meter.label }),
-      el('span', { class: 'pool-pct' }, [
-        el('span', { text: pct(meter.pct) }),
-        maxxed ? el('span', { class: 'pool-max', text: '✦' }) : null,
+function overviewBar(bar) {
+  return el('div', { class: 'ov-bar' }, [
+    el('span', { class: 'ov-bar-name', text: bar.name }),
+    el('span', { class: `ov-bar-val${bar.maxxed ? ' is-maxxed' : ''}`, text: `${pct(bar.value)}${bar.maxxed ? ' ✦' : ''}` }),
+    el('span', { class: 'ov-bar-rail', vars: { '--w': Math.min(100, Math.max(0, bar.value || 0)), '--even': known(bar.even) ? Math.min(100, Math.max(0, bar.even)) : -5 } }, [
+      el('i', { class: bar.maxxed ? 'is-maxxed' : null }),
+      known(bar.even) ? el('b', { title: `${pct(bar.even)} would be even pace` }) : null,
+    ]),
+  ]);
+}
+
+/** Compact: ring, verdict, countdown, then every other window as a bar. */
+function overviewCluster(summary) {
+  return el('button', {
+    type: 'button', class: 'ovc', vars: { '--c': summary.hue },
+    title: `Open ${summary.label} detail`, onclick: summary.onOpen,
+  }, [
+    ringFigure(summary.ring.value, summary.ring.label, OVERVIEW_RING.compact, summary.ring.value >= 100),
+    el('div', { class: 'ovc-head' }, [el('span', { class: 'ovc-name', text: summary.label }), overviewChip(summary)]),
+    el('div', { class: 'ovc-when', text: overviewWhen(summary) }),
+    el('div', { class: 'ovc-bars' }, summary.bars.map(overviewBar)),
+  ]);
+}
+
+/** Expanded: the same ring with the verdict spelled out. */
+function overviewCard(summary) {
+  const p = summary.pace;
+  const proj = p ? projection(p) : null;
+  const headline = summary.unavailable ? 'Unavailable'
+    : p && proj.runsOut && p.status !== 'exhausted' ? `Runs dry in ${duration(p.runsOutIn)}`
+    : p && p.status === 'exhausted' ? 'Out until the reset'
+    : `${remainingTime(summary.resetAt)} of ${summary.ring.label} left`;
+  const detail = summary.unavailable ? summary.unavailable
+    : p ? paceSentence(p) : 'No pace yet: this window reports no reset time.';
+  return el('article', { class: 'ovp', vars: { '--c': summary.hue } }, [
+    el('div', { class: 'ovp-head' }, [
+      el('span', { class: 'prov-mark' }, [icon(PROVIDER_GLYPH[summary.id], 18)]),
+      el('div', {}, [
+        el('div', { class: 'ovp-name', text: summary.label }),
+        el('div', { class: 'ovp-note', text: summary.note }),
       ]),
-    ]);
-    row.style.setProperty('--c', PROVIDER_HUE.cursor);
-    // These are all Cursor pools, so the bar carries Cursor's hue. Severity
-    // tints only the number, and only once it is genuinely critical — three
-    // red bars would shout the same thing the alert above already says.
-    const bar = el('div', { class: `meter is-plain pool-bar${maxxed ? ' is-maxxed' : ''}` }, [el('i', {})]);
-    bar.style.setProperty('--c', PROVIDER_HUE.cursor);
-    bar.querySelector('i').style.width = known(meter.pct) ? `${Math.max(0, Math.min(100, meter.pct)).toFixed(1)}%` : '0%';
-    row.append(bar);
-    withTooltip(row, () => [
-      el('b', { text: `${meter.label} — ${pct(meter.pct, 1)} consumed` }),
-      el('div', { class: 'muted', text: meter.hint }),
-    ]);
-    host.append(row);
-  }
+      overviewChip(summary),
+    ]),
+    el('div', { class: 'ovp-body' }, [
+      ringFigure(summary.ring.value, summary.ring.label, OVERVIEW_RING.expanded, summary.ring.value >= 100),
+      el('div', { class: 'ovp-facts' }, [
+        el('div', { class: `ovp-headline${p && proj?.runsOut ? ' is-warn' : ''}`, text: headline }),
+        el('div', { class: 'ovp-detail', text: detail }),
+      ]),
+    ]),
+    summary.bars.length ? el('div', { class: 'ovp-bars' }, summary.bars.map(overviewBar)) : null,
+    el('div', { class: 'ovp-foot' }, summary.foot.filter(Boolean).map(text => el('span', { text }))),
+  ]);
 }
 
-// ── overview: attention ───────────────────────────────────────────────────
-
-function renderAttention() {
-  const host = $('attention');
-  host.replaceChildren();
-
-  if (state.cycleError) {
-    host.append(el('div', { class: 'alert', vars: { '--c': SEVERITY.now } }, [
-      iconWithClass(ICONS.alert, 'alert-icon'),
-      el('div', { class: 'alert-title', text: 'Usage engine could not read your cycle' }),
-      el('div', { class: 'alert-detail', text: state.cycleError }),
-    ]));
-    return;
-  }
-
-  const items = state.cycle?.attention || [];
-  const pacing = paceAlerts();
-  for (const alert of pacing) {
+/** Only what is actually biting, once each, worst first. */
+function watchRows(summaries) {
+  const rows = [];
+  for (const alert of paceAlerts()) {
     const p = alert.pace;
-    const node = el('div', { class: 'alert', vars: { '--c': SEVERITY[PACE_SEVERITY[p.status]] } }, [
-      iconWithClass(ICONS.alert, 'alert-icon'),
-      el('div', { class: 'alert-title', text: p.status === 'fast'
-        ? `${alert.name}: slow down, ${p.multiplier.toFixed(1)}× faster than the reset allows`
-        : `${alert.name}: ahead of pace, ${p.multiplier.toFixed(1)}× the even rate` }),
-      el('div', { class: 'alert-detail', text: `${paceSentence(p)} ${resetText(alert.resets_at)}.` }),
-      el('div', { class: 'alert-actions' }, [
-        el('button', { class: 'chip', type: 'button', text: 'See every window', onclick: () => selectView('resets') }),
-      ]),
-    ]);
-    host.append(node);
+    rows.push({
+      tone: PACE_SEVERITY[p.status], icon: p.status === 'fast' ? PACE_ICON.fast : PACE_ICON.ahead,
+      title: `${alert.name} ${projection(p).runsOut ? 'runs dry' : `is ${times(p.multiplier)}× the even pace`}`,
+      detail: `${pct(alert.pace.used)} used · ${rateText(p.allowedPerHour, p.total)} would last`,
+      when: projection(p).runsOut ? duration(p.runsOutIn) : remainingTime(alert.resets_at),
+      sort: projection(p).runsOut ? p.runsOutIn : p.remaining,
+    });
   }
-  if (!state.cycle) return;
+  for (const summary of summaries) {
+    const spent = summary.bars.filter(b => b.maxxed);
+    if (spent.length) rows.push({
+      tone: 'off', icon: ICONS.spark,
+      title: `${spent.map(b => b.name).join(' and ')} ${spent.length > 1 ? 'are' : 'is'} spent`,
+      detail: `${summary.label} · nothing left in ${spent.length > 1 ? 'these pools' : 'this pool'} until the reset`,
+      when: known(summary.resetAt) ? momentText(summary.resetAt, summary.span) : '—',
+      sort: Number.MAX_SAFE_INTEGER,
+    });
+    if (summary.unavailable) rows.push({
+      tone: 'off', icon: ICONS.alert, title: `${summary.label} usage unavailable`,
+      detail: summary.unavailable, when: '', sort: Infinity,
+    });
+  }
+  return rows.sort((a, b) => a.sort - b.sort);
+}
 
-  if (!items.length && !pacing.length) {
-    host.append(el('div', { class: 'all-clear' }, [
-      iconWithClass(ICONS.check, '', 17),
-      el('span', { text: 'No high usage reported, and every window with a reset time is on pace.' }),
+function cycleStats(report, full) {
+  const end = report.cycle_end ? Date.parse(report.cycle_end) / 1000 : null;
+  const stat = (value, unit, label, note) => el('div', { class: `ov-stat${full ? ' card' : ''}` }, [
+    el('b', {}, [value, unit && el('small', { text: unit })]),
+    el('span', { text: label }),
+    full && note ? el('span', { class: 'sub', text: note }) : null,
+  ]);
+  return el('div', { class: `ov-stats${full ? '' : ' is-mini'}` }, [
+    stat(money(report.total_spend_cents, 0), null, full ? 'Cursor reported spend' : 'cycle spend',
+      `${money(report.included_cents, 0)} included · ${money(report.bonus_cents, 0)} bonus`),
+    stat(known(report.burn_cents_per_day) ? money(report.burn_cents_per_day, 0) : '—', '/day', full ? 'average so far' : 'average',
+      'reported spend ÷ elapsed cycle days'),
+    stat(compact(report.agg_cache_read), null, full ? 'cache read tokens' : 'cache read',
+      `${compact(report.agg_input)} in · ${compact(report.agg_output)} out`),
+    full ? stat(compact(report.events_fetched), null, 'recorded events',
+      report.events_complete ? 'complete history' : `of ${compact(report.events_total)} · incomplete`) : null,
+    stat(known(end) ? remainingTime(end) : '—', null, full ? 'until the cycle resets' : 'cycle resets',
+      known(end) ? momentText(end, 30 * 86400) : 'not returned by Cursor'),
+  ]);
+}
+
+function topRuns(report, count) {
+  const runs = (report.conversations || []).slice(0, count);
+  if (!report.events_complete || !runs.length) return null;
+  return el('article', { class: 'card' }, [
+    el('span', { class: 'kicker', text: 'Top runs this cycle' }),
+    el('div', { class: 'runs ov-runs' }, runs.map(row => el('div', { class: 'run' }, [
+      el('span', { class: `run-dot${row.headless ? ' is-cloud' : ''}` }),
+      el('span', { class: 'run-name', text: row.name, title: row.name }),
+      el('span', { class: 'run-cost', text: `${compact(row.n)} event${row.n === 1 ? '' : 's'} · ${money(row.cents)}` }),
+    ]))),
+  ]);
+}
+
+function renderOverviewCompact(host, extra, summaries) {
+  host.append(el('div', { class: 'ov-compact' }, summaries.map(overviewCluster)));
+  const report = state.cycle;
+  if (!report) return;
+  extra.append(cycleStats(report, false));
+  const runs = topRuns(report, 3);
+  if (runs) extra.append(runs);
+}
+
+function renderOverviewExpanded(host, extra, summaries) {
+  host.append(el('div', { class: 'ov-cards' }, summaries.map(overviewCard)));
+  const report = state.cycle;
+  if (!report) return;
+  extra.append(cycleStats(report, true));
+  const runs = topRuns(report, 6);
+  if (runs) {
+    runs.append(el('p', { class: 'tile-note', text: 'Event-reported usage values from Cursor usage history, not cash charges.' }));
+    extra.append(runs);
+  }
+}
+
+function renderOverview() {
+  const mode = overviewMode();
+  const host = $('overviewBody');
+  const extra = $('overviewExtra');
+  host.replaceChildren();
+  extra.replaceChildren();
+  for (const button of document.querySelectorAll('#overviewMode [data-mode]')) {
+    button.setAttribute('aria-checked', String(button.dataset.mode === mode));
+  }
+  const summaries = overviewSummaries();
+  if (mode === 'compact') renderOverviewCompact(host, extra, summaries);
+  else renderOverviewExpanded(host, extra, summaries);
+  renderBell(summaries);
+}
+
+// ── notifications ─────────────────────────────────────────────────────────
+// Everything that asks for attention lives behind the bell: windows running
+// dry, spent pools, where there is room to work, and the app's own status
+// and updates. The badge counts what needs a look; the countdowns inside
+// are the largest type in the panel.
+
+function bellOpen() {
+  return !$('bellPanel').hidden;
+}
+
+function setBellOpen(open) {
+  $('bellPanel').hidden = !open;
+  $('btnBell').setAttribute('aria-expanded', String(open));
+}
+
+function renderBell(summaries = overviewSummaries()) {
+  const rows = watchRows(summaries);
+  const list = $('bellRows');
+  list.replaceChildren();
+  if (rows.length) {
+    for (const row of rows) list.append(el('button', {
+      type: 'button', class: 'bell-row', vars: { '--s': SEVERITY[row.tone] || SEVERITY.off },
+      onclick: () => { setBellOpen(false); selectView('resets'); },
+    }, [
+      iconWithClass(row.icon, '', 16),
+      el('div', {}, [el('div', { class: 'bell-title', text: row.title }), el('div', { class: 'bell-detail', text: row.detail })]),
+      el('span', { class: 'bell-when', text: row.when }),
     ]));
-    return;
+  } else {
+    list.append(el('div', { class: 'bell-clear' }, [iconWithClass(ICONS.check, '', 16),
+      el('span', { text: 'Nothing is over pace, and no pool is spent.' })]));
   }
+  $('bellAdvice').replaceChildren(...overviewAdvice(summaries));
+  $('bellCount').textContent = rows.length ? `${rows.length} now` : 'all clear';
 
-  let linkShown = false;
-  for (const item of items) {
-    const celebrate = item.tone === 'celebrate';
-    const color = celebrate
-      ? PROVIDER_HUE[item.provider] || PROVIDER_HUE.cursor
-      : SEVERITY[item.severity] || SEVERITY.soon;
-    const alert = el('div', { class: `alert${celebrate ? ' is-celebrate' : ''}`, vars: { '--c': color } }, [
-      iconWithClass(celebrate ? ICONS.spark : ICONS.alert, 'alert-icon'),
-      el('div', { class: 'alert-title', text: item.title }),
-      el('div', { class: 'alert-detail', text: item.detail }),
-    ]);
-    if (item.link && !linkShown) {
-      linkShown = true;
-      alert.append(el('div', { class: 'alert-actions' }, [
-        el('button', {
-          class: 'chip chip-primary',
-          type: 'button',
-          text: item.link.label,
-          onclick: () => window.hud.openExternal(item.link.url),
-        }),
-      ]));
-    }
-    host.append(alert);
-  }
+  // The badge counts attention rows; an update waiting or an engine fault
+  // still marks the bell even when every window is fine.
+  const badge = $('bellBadge');
+  const urgent = rows.some(row => row.tone === 'now' || row.tone === 'soon');
+  const updateReady = state.update?.status === 'ready';
+  const fault = state.statusKind === 'now';
+  badge.hidden = !rows.length && !updateReady && !fault;
+  badge.textContent = rows.length ? String(Math.min(rows.length, 9)) : '';
+  badge.classList.toggle('is-calm', !urgent && !fault && !updateReady);
+  $('btnBell').setAttribute('aria-label', rows.length ? `Notifications: ${rows.length} need attention` : 'Notifications');
 }
 
 function iconWithClass(paths, className, size = 18) {
   const node = icon(paths, size);
   if (className) node.setAttribute('class', className);
   return node;
-}
-
-// ── overview: tiles ───────────────────────────────────────────────────────
-
-/** Sparkline: 12 points, de-emphasis hue, current period marked in the accent. */
-function sparkline(points) {
-  const width = 150;
-  const height = 30;
-  const values = points.slice(-12).map((p) => p.cents);
-  const svg = svgEl('svg', { class: 'spark', viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' });
-  if (values.length < 2) return svg;
-
-  const max = Math.max(...values, 1);
-  const step = width / (values.length - 1);
-  const y = (v) => height - 3 - (v / max) * (height - 6);
-  const coords = values.map((v, i) => [i * step, y(v)]);
-  const line = coords.map(([x, yy], i) => `${i ? 'L' : 'M'}${x.toFixed(1)} ${yy.toFixed(1)}`).join(' ');
-
-  const gradientId = `sparkFade-${Math.random().toString(36).slice(2, 8)}`;
-  const defs = svgEl('defs');
-  const gradient = svgEl('linearGradient', { id: gradientId, x1: 0, y1: 0, x2: 0, y2: 1 });
-  gradient.append(svgEl('stop', { offset: '0%', 'stop-color': '#6e6e76', 'stop-opacity': 0.30 }));
-  gradient.append(svgEl('stop', { offset: '100%', 'stop-color': '#6e6e76', 'stop-opacity': 0 }));
-  defs.append(gradient);
-  svg.append(defs);
-
-  svg.append(svgEl('path', { d: `${line} L${width} ${height} L0 ${height} Z`, fill: `url(#${gradientId})` }));
-  svg.append(svgEl('path', { class: 'spark-line', d: line }));
-  const [lx, ly] = coords[coords.length - 1];
-  svg.append(svgEl('circle', { class: 'spark-dot', cx: lx, cy: ly, r: 3 }));
-  return svg;
-}
-
-function deltaNode(deltaPct, { upIsBad = true } = {}) {
-  if (deltaPct === null || deltaPct === undefined) return null;
-  const up = deltaPct >= 0;
-  const bad = up === upIsBad;
-  const color = Math.abs(deltaPct) < 5 ? 'var(--ink-3)' : bad ? 'var(--soon)' : 'var(--ok)';
-  return el('span', {
-    class: 'tile-delta',
-    vars: { color },
-    text: `${up ? '↑' : '↓'} ${Math.abs(deltaPct).toFixed(0)}% vs prior week`,
-  });
-}
-
-function tile(label, value, extras = []) {
-  return el('div', { class: 'tile' }, [
-    el('div', { class: 'tile-label', text: label }),
-    el('div', { class: 'tile-value', text: value }),
-    ...[].concat(extras).filter(Boolean),
-  ]);
-}
-
-function renderTiles() {
-  const host = $('tiles');
-  host.replaceChildren();
-  const report = state.cycle;
-  if (!report) {
-    host.append(tile('Cursor usage', 'Unavailable', [el('div', {class:'tile-note', text:state.cycleError || 'Waiting for the dashboard response.'})]));
-    return;
-  }
-  host.append(tile('Cursor reported spend', money(report.total_spend_cents), [
-    el('div', {class:'tile-note',text:`${money(report.included_cents,0)} included · ${money(report.bonus_cents,0)} bonus`}),
-    el('div', {class:'tile-note',text:`Dashboard usage value, including bonus · ${relativeTime(report.fetched_at)}`}),
-  ]));
-  host.append(tile('Cursor reported tokens', `${compact(report.agg_output)} out`, [
-    el('div',{class:'tile-note',text:`${compact(report.agg_input)} in`}),
-    el('div',{class:'tile-note',text:`${compact(report.agg_cache_read)} cache read`}),
-    el('div',{class:'tile-note',text:`${compact(report.agg_cache_write)} cache write`}),
-    ...(report.source_errors || []).map(error => el('div',{class:'tile-note',text:error})),
-  ]));
-  host.append(tile('Average spend so far', known(report.burn_cents_per_day) ? `${money(report.burn_cents_per_day,0)} / day` : 'Unavailable', [
-    el('div',{class:'tile-note',text:'Calculated: reported spend ÷ elapsed cycle days'}),
-  ]));
-  const cycleEnd = report.cycle_end ? Date.parse(report.cycle_end) / 1000 : null;
-  host.append(tile('Cursor cycle reset', known(cycleEnd) ? new Date(cycleEnd*1000).toLocaleDateString([], {month:'short',day:'numeric'}) : 'Unavailable', [
-    el('div',{class:'tile-note',text:known(cycleEnd) ? resetText(cycleEnd) : 'Not returned by Cursor'}),
-  ]));
-  const runs = (report.conversations || []).slice(0,4);
-  const coverage = `${compact(report.events_fetched)} of ${compact(report.events_total)} events loaded`;
-  host.append(el('div',{class:'tile tile-span-2'},[
-    el('div',{class:'tile-label',text:'Recorded agents & runs'}),
-    report.events_complete ? el('div',{class:'runs'},runs.map(row => el('div',{class:'run'},[
-      el('span',{class:`run-dot${row.headless ? ' is-cloud' : ''}`}),
-      el('span',{class:'run-name',text:row.name,title:row.name}),
-      el('span',{class:'run-cost',text:`${compact(row.n)} events · ${money(row.cents)}`}),
-    ]))) : el('div',{class:'empty',text:'Breakdown unavailable: event history is incomplete.'}),
-    el('div',{class:'tile-note',text:coverage}),
-    el('div',{class:'tile-note',text:'Amounts are event-reported usage values, not cash charges.'}),
-    report.event_costs_reconciled === false ? el('div',{class:'tile-note',text:'Event values do not reconcile to the dashboard cycle total.'}) : null,
-    report.events_incomplete_reason ? el('div',{class:'tile-note',text:report.events_incomplete_reason}) : null,
-    report.events_complete ? el('div',{class:'tile-note',text:`${compact(report.headless?.n)} events reported as cloud/headless`}) : null,
-  ]));
 }
 
 // ── this chat ─────────────────────────────────────────────────────────────
@@ -1125,6 +1184,25 @@ function pickRequest(index) {
 }
 
 function renderSessionControls(provider, followsOpen, isAuto) {
+  try {
+    const saved = localStorage.getItem('overviewMode');
+    if (saved === 'compact' || saved === 'expanded') state.overviewMode = saved;
+  } catch { /* preference is optional */ }
+  for (const button of document.querySelectorAll('#overviewMode [data-mode]')) {
+    button.addEventListener('click', () => setOverviewMode(button.dataset.mode));
+  }
+  $('btnBell').addEventListener('click', (event) => {
+    event.stopPropagation();
+    setBellOpen(!bellOpen());
+  });
+  document.addEventListener('click', (event) => {
+    if (bellOpen() && !event.target.closest('#bellPanel, #btnBell')) setBellOpen(false);
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && bellOpen()) setBellOpen(false);
+  });
+  window.hud.on('updateStatus', (value) => { state.update = value; renderBell(); });
+  window.hud.updateStatus().then((value) => { state.update = value; renderBell(); }).catch(() => {});
   for (const chip of document.querySelectorAll('#sessionProviders [data-provider]')) {
     chip.setAttribute('aria-checked', String(chip.dataset.provider === state.sessionProvider));
     if (chip.dataset.provider === 'auto') chip.textContent = isAuto && state.autoDetected ? `Auto · ${provider === 'claude' ? 'Claude Code' : 'Codex'}` : 'Auto';
@@ -1213,7 +1291,7 @@ async function startProviderLink(id) {
     state.links[id] = {provider:id,status:'error',message:engineMessage(error)};
   }
   renderResets();
-  renderLegend();
+  paintOverview();
 }
 
 function connectionControls(id, label, connected) {
@@ -1260,7 +1338,7 @@ function handleLinkState(link) {
     refreshProviders(true);
   }
   renderResets();
-  renderLegend();
+  paintOverview();
 }
 
 // Each window is a Material 3 card after Android's Data usage meter: the
@@ -1748,8 +1826,11 @@ function engineMessage(err) {
 }
 
 function setStatus(kind, text) {
+  const changed = state.statusKind !== kind;
+  state.statusKind = kind;
   $('statusDot').style.setProperty('--c', SEVERITY[kind] || SEVERITY.off);
   $('statusText').textContent = text;
+  if (changed) renderBell();
 }
 
 function openDashboard() {
@@ -1777,10 +1858,7 @@ function positionThumb() {
 // ── data flow ─────────────────────────────────────────────────────────────
 
 function paintOverview() {
-  renderDial();
-  renderLegend();
-  renderAttention();
-  renderTiles();
+  renderOverview();
   const report = state.cycle;
   const age = known(report?.fetched_at) ? Date.now()/1000-report.fetched_at : Infinity;
   const stale = state.cycleError || report?.stale || age > 300;
