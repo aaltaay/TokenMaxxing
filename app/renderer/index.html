@@ -29,6 +29,14 @@
     </div>
 
     <div class="titlebar-actions">
+      <button class="icon-btn bell" id="btnBell" type="button" title="Notifications" aria-label="Notifications"
+              aria-haspopup="dialog" aria-expanded="false" aria-controls="bellPanel">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M18 8a6 6 0 0 0-12 0c0 7-3 8-3 8h18s-3-1-3-8"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>
+        </svg>
+        <span class="bell-badge" id="bellBadge" hidden></span>
+      </button>
       <button class="icon-btn" id="btnRefresh" title="Refresh usage" aria-label="Refresh usage">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -46,98 +54,64 @@
 
   <nav class="segmented" role="tablist" aria-label="Views">
     <span class="segmented-thumb" id="segThumb" aria-hidden="true"></span>
-    <button role="tab" id="tab-overview" aria-controls="view-overview" aria-selected="true">Overview</button>
+    <button role="tab" id="tab-resets" aria-controls="view-resets" aria-selected="true">Limits & resets</button>
     <button role="tab" id="tab-chat" aria-controls="view-chat" aria-selected="false">Sessions</button>
-    <button role="tab" id="tab-resets" aria-controls="view-resets" aria-selected="false">Limits & resets</button>
     <button role="tab" id="tab-guide" aria-controls="view-guide" aria-selected="false">Model guide</button>
   </nav>
 
-  <main class="views">
-
-    <!-- ── Overview ──────────────────────────────────────────────────── -->
-    <section class="view is-active" id="view-overview" role="tabpanel" aria-labelledby="tab-overview">
-
-      <div class="card">
-        <div class="card-head">
-          <h2>Usage</h2>
-          <span class="meta" id="cycleMeta">—</span>
-        </div>
-        <div class="hero">
-          <div class="dial" id="dial">
-            <svg viewBox="0 0 224 224" role="img" aria-labelledby="dialTitle">
-              <title id="dialTitle">Reported usage by provider; unavailable providers have no consumption arc</title>
-              <g id="dialRings"></g>
-            </svg>
-            <div class="dial-center">
-              <div class="dial-value" id="dialValue">—</div>
-              <div class="dial-label" id="dialLabel">Cursor used</div>
-            </div>
-          </div>
-          <div class="legend" id="legend"></div>
-        </div>
-        <div class="pools" id="pools"></div>
+  <!-- Alerts, where to work, and the app's own status and updates: the one
+       place anything asks for attention. -->
+  <div class="bell-panel" id="bellPanel" role="dialog" aria-label="Notifications" hidden>
+    <div class="bell-head"><span class="kicker">Needs attention</span><span class="bell-count" id="bellCount"></span></div>
+    <div class="bell-rows" id="bellRows"></div>
+    <div class="bell-advice" id="bellAdvice"></div>
+    <div class="bell-app">
+      <div class="bell-status"><span class="dot" id="statusDot"></span><span id="statusText">Starting…</span><span class="bell-events" id="statusEvents"></span></div>
+      <div class="bell-update">
+        <span id="updateStatus" role="status" aria-live="polite">Checking app version…</span>
+        <button class="chip" id="btnUpdate" type="button">Check for updates</button>
       </div>
+    </div>
+  </div>
 
-      <div class="attention" id="attention"></div>
-
-      <div class="tiles" id="tiles"></div>
-
-    </section>
+  <main class="views">
 
     <!-- ── This chat ─────────────────────────────────────────────────── -->
     <section class="view" id="view-chat" role="tabpanel" aria-labelledby="tab-chat">
 
-      <div class="card">
-        <div class="card-head">
-          <h2>Session usage</h2>
-          <span class="meta" id="chatModel">—</span>
+      <div class="sess-controls">
+        <div class="filter-chips" id="sessionProviders" role="radiogroup" aria-label="Provider">
+          <button type="button" class="filter-chip" role="radio" aria-checked="true" data-provider="auto">Auto</button>
+          <button type="button" class="filter-chip" role="radio" aria-checked="false" data-provider="claude">Claude Code</button>
+          <button type="button" class="filter-chip" role="radio" aria-checked="false" data-provider="codex">Codex</button>
+          <button type="button" class="filter-chip" role="radio" aria-checked="false" data-provider="cursor">Cursor</button>
         </div>
-        <div class="row-actions">
-          <label for="sessionProvider">Provider</label>
-          <select class="select" id="sessionProvider"><option value="auto">Auto (whatever you're in)</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="cursor">Cursor</option></select>
+        <div class="filter-chips is-quiet" id="sessionFollowRow" role="radiogroup" aria-label="Follow">
+          <button type="button" class="filter-chip" role="radio" aria-checked="true" data-follow="active" id="sessionFollowOpen">Open chat</button>
+          <button type="button" class="filter-chip" role="radio" aria-checked="false" data-follow="latest">Latest activity</button>
         </div>
-        <div class="row-actions" id="sessionFollowRow">
-          <label for="sessionFollow">Follow</label>
-          <select class="select" id="sessionFollow"><option value="active" id="sessionFollowOpen">Open Codex chat</option><option value="latest">Latest activity</option></select>
-        </div>
-        <p class="tile-note" id="sessionMode">Following the open Codex chat.</p>
-        <div class="chat-picker">
-          <select class="select" id="chatSelect" aria-label="Chat to follow"></select>
-          <button class="chip" id="btnUnpin">Follow open chat</button>
-        </div>
-        <div id="chatBody"></div>
       </div>
-
-      <div class="card">
-        <div class="card-head"><h2 id="sessionBreakdownTitle">Recorded token usage</h2>
-          <span class="meta" id="chatTax">—</span>
-        </div>
-        <div class="cat-rows" id="chatCats"></div>
+      <div class="sess-mode">
+        <i class="sess-mode-dot" id="sessionModeDot"></i>
+        <span id="sessionMode">Finding your session…</span>
+        <button class="chip" id="btnUnpin" hidden>Follow open chat</button>
       </div>
-
-      <div class="card">
-        <div class="card-head"><h2 id="sessionCostTitle">Recorded usage value for this session</h2>
-          <span class="meta" id="sessionCostScope">this cycle</span>
-        </div>
-        <div id="chatBilled"></div>
-      </div>
+      <article class="card sess-list" id="sessionList"></article>
 
     </section>
 
     <!-- ── Resets ────────────────────────────────────────────────────── -->
-    <section class="view" id="view-resets" role="tabpanel" aria-labelledby="tab-resets">
-      <div class="card">
-        <div class="card-head">
-          <h2>Provider windows</h2>
-          <span class="meta" id="resetsNow">—</span>
+    <section class="view is-active" id="view-resets" role="tabpanel" aria-labelledby="tab-resets">
+      <div class="resets-intro">
+        <div class="resets-legend">
+          <span><i class="sw sw-line"></i>Average so far</span>
+          <span><i class="sw sw-dash"></i>At this rate</span>
+          <span><i class="sw sw-dot"></i>Even pace</span>
+          <span><i class="sw sw-hatch"></i>Out of quota</span>
+          <span class="resets-now" id="resetsNow">—</span>
         </div>
-        <p class="tile-note flush">
-          Usage percentages and reset times returned by each provider. Missing data is shown as unavailable.
-          The tick on each bar is where usage would sit if it were spread evenly until the reset; the pace line says
-          whether the current rate runs out first and what rate would last.
-        </p>
       </div>
-      <div id="resetCards"></div>
+      <div id="resetCards" class="prov-list"></div>
       <div class="card">
         <div class="card-head"><h2>Reset alerts</h2></div>
         <div class="row-actions flush">
@@ -516,16 +490,6 @@
 
   </main>
 
-  <div class="update-strip" aria-label="Application updates">
-    <span id="updateStatus" role="status" aria-live="polite">Checking app version…</span>
-    <button class="chip" id="btnUpdate" type="button">Check for updates</button>
-  </div>
-  <footer class="statusbar">
-    <span class="dot" id="statusDot"></span>
-    <span id="statusText">Starting…</span>
-    <span class="spacer"></span>
-    <span id="statusEvents"></span>
-  </footer>
 
 </div>
 

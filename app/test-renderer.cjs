@@ -101,16 +101,71 @@ test('missing metrics remain unavailable while actual zero remains zero', () => 
   assert.equal(run('compact(0)'), '0');
 });
 
-test('session cost distinguishes estimates, partial history, zero and unavailable', () => {
+test('session cost notes distinguish estimates, partial history, reported totals and unavailable', () => {
   const run = renderer();
-  run(`el = (tag, attrs) => attrs; const costRows = []; const costContainer = {append: row => costRows.push(row)};`);
-  run(`renderSessionCost(costContainer, {cents:33, priced_requests:2, partial:true, basis:'API value, not billed charges', pricing_date:'2026-09-20'})`);
-  assert.equal(run('costRows[0].text'), '≈ $0.33');
-  assert.match(run('costRows[1].text'), /Partial estimate/);
-  run(`costRows.length=0; renderSessionCost(costContainer, {cents:0, priced_requests:1})`);
-  assert.equal(run('costRows[0].text'), '≈ $0.00');
-  run(`costRows.length=0; renderSessionCost(costContainer, null)`);
-  assert.match(run('costRows[0].text'), /Cost unavailable/);
+  const notes = (cost) => JSON.parse(run(`JSON.stringify(costNotes(${JSON.stringify(cost)}))`));
+  assert.match(notes({cents:33, priced_requests:2, partial:true, basis:'API value', pricing_date:'2026-09-20'})[0], /Partial estimate · 2 priced/);
+  assert.match(notes({cents:0, priced_requests:1})[0], /1 recorded requests/);
+  assert.match(notes({cents:null, priced_requests:0})[0], /Cost unavailable/);
+  assert.match(notes(null)[0], /Cost unavailable/);
+  assert.deepEqual(notes({cents:125, reported:true, basis:'Reported by Claude Code.', series:[[1, 2, 0, 3]]}),
+    ['Reported by Claude Code.', 'Per-request amounts are estimates at API rates from the session log.']);
+});
+
+test('the week is counted in 5-hour sessions from the measured share', () => {
+  const run = renderer();
+  const figures = (pair, session, week) => JSON.parse(run(`JSON.stringify(budgetFigures(${JSON.stringify(pair)}, ${JSON.stringify(session)}, ${JSON.stringify(week)}))`));
+  const later = Date.now() / 1000 + 3600;
+  // 11% of the week per full session, 81% of the week gone, session at 9%.
+  const roomy = figures({share: 0.11}, {used_percent: 9, resets_at: later}, {used_percent: 81});
+  assert.ok(Math.abs(roomy.perWeek - 9.09) < 0.01);
+  assert.ok(Math.abs(roomy.sessionsLeft - 19 / 11) < 1e-9);
+  assert.ok(Math.abs(roomy.room - 10.01) < 1e-9);
+  assert.equal(roomy.stopsAt, null);
+  // 5% of the week left cannot carry the other 91% of this session.
+  const tight = figures({share: 0.11}, {used_percent: 9, resets_at: later}, {used_percent: 95});
+  assert.ok(Math.abs(tight.stopsAt - (9 + 5 / 0.11)) < 1e-9);
+  // No current 5-hour reading: nothing is said about this session.
+  const idle = figures({share: 0.11}, {used_percent: 40, resets_at: Date.now() / 1000 - 1}, {used_percent: 50});
+  assert.equal(idle.room, null);
+  assert.equal(idle.stopsAt, null);
+});
+
+test('a session climbing in cost says so, and counts only real rebuilds', () => {
+  const run = renderer();
+  const series = Array.from({length: 30}, (_, i) => [1000 + i * 60, 2 + i, i === 20 ? 1 : 0, 10000 * (i + 1)]);
+  const stats = JSON.parse(run(`JSON.stringify(sessionStats({series: ${JSON.stringify(series)}, series_start: 0, last_request_cents: 31}))`));
+  assert.equal(stats.early, 6.5);
+  assert.equal(stats.climbing, true);
+  assert.equal(stats.rebuilds, 1);
+  assert.equal(stats.rebuildCents, 22);
+  assert.equal(stats.firstContext, 10000);
+  // A truncated series has no honest "start of the session" to compare with.
+  const tail = JSON.parse(run(`JSON.stringify(sessionStats({series: ${JSON.stringify(series)}, series_start: 500, last_request_cents: 31}))`));
+  assert.equal(tail.early, null);
+  assert.equal(tail.firstContext, null);
+});
+
+test('the priciest requests are explained by what dominated their cost', () => {
+  const run = renderer();
+  const explain = (d, stats = {firstContext: 20000}) => JSON.parse(run(`JSON.stringify(explainRequest(${JSON.stringify(d)}, ${JSON.stringify(stats)}))`));
+  const expired = explain({index: 40, cents: 520, gap: 5400, model: 'claude-opus-5', previous_model: 'claude-opus-5', context: 520000, rebuild: true,
+    parts: [['Cache write (1-hour)', 518000, 518], ['Output', 800, 2]]});
+  assert.equal(expired.tag, 'Cache expired · 1h 30m idle');
+  assert.match(expired.why[0], /longer than the 1-hour cache lasts/);
+  const switched = explain({index: 9, cents: 300, gap: 30, model: 'claude-sonnet-5', previous_model: 'claude-opus-5', context: 300000, rebuild: true,
+    parts: [['Cache write (5-minute)', 299000, 299], ['Output', 100, 1]]});
+  assert.equal(switched.tag, 'Model switch');
+  const output = explain({index: 6, cents: 67, gap: 90, model: 'claude-opus-5', previous_model: 'claude-opus-5', context: 110000,
+    parts: [['Cache read', 101954, 5.1], ['Cache write (1-hour)', 8067, 8.07], ['Output', 21681, 54.2]]});
+  assert.equal(output.tag, 'Long output · 21.7k');
+  assert.match(output.why[0], /\$25\/M/);
+  const context = explain({index: 200, cents: 30, gap: 20, model: 'm', previous_model: 'm', context: 531000,
+    parts: [['Cache read', 528900, 26.4], ['Output', 451, 1.1]]});
+  assert.match(context.why[0], /27× the size at the start/);
+  const long = explain({index: 3, cents: 247.5, context: 300000, long_context: true,
+    parts: [['Uncached input', 100000, 200], ['Cached input', 200000, 40], ['Output', 1000, 7.5]]});
+  assert.match(long.why[1], /long-context rate/);
 });
 
 test('provider rings cannot be generated from reset countdowns', () => {
@@ -147,7 +202,7 @@ test('a held reading keeps its arc and says it is being held', () => {
 test('a failed refresh keeps the previous snapshot on screen', async () => {
   const run = renderer();
   run(`state.providers={providers:[{id:'claude',status:'ok',source:'test',fetched_at:Date.now()/1000,windows:[{id:'five_hour',label:'5-hour',used_percent:64,window_minutes:300,resets_at:Date.now()/1000+3600}]}]}`);
-  run(`renderResets = () => {}; paintOverview = () => {};
+  run(`renderResets = () => {}; paintStatus = () => {};
     window.hud.call=async()=>{throw new Error('engine busy')}`);
   await run(`refreshProviders(true)`);
   assert.equal(run(`state.providers.providers[0].windows[0].used_percent`),64);
@@ -194,7 +249,7 @@ test('a forced refresh during polling is queued and replaces the old account sna
   const run = renderer();
   run(`
     renderResets = () => {};
-    paintOverview = () => {};
+    paintStatus = () => {};
     const refreshCalls = [];
     const completions = [];
     window.hud.call = (command, args) => {
