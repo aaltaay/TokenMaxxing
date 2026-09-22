@@ -1,8 +1,8 @@
 'use strict';
 
 /* AI Usage Command Center — renderer.
-   Reads from the Python engine over window.hud and paints three views:
-   Overview (dial + attention + tiles), This chat, Resets. */
+   Reads from the Python engine over window.hud and paints Limits & resets
+   (the default view), Sessions, and the static Model guide. */
 
 const POLL = {
   clock: 10000,    // minute-scale reset countdowns and snapshot freshness
@@ -37,9 +37,7 @@ const state = {
   autoDetected: null,
   autoActive: false,
   focus: null,
-  view: 'overview',
-  // Overview detail: compact rings, or every provider spelled out.
-  overviewMode: 'compact',
+  view: 'resets',
   // What the bell badge reflects besides alerts: a waiting update and the
   // engine's own status.
   update: null,
@@ -149,10 +147,7 @@ function withTooltip(node, build) {
   return node;
 }
 
-// ── overview: the dial ────────────────────────────────────────────────────
-
-// Sized so the innermost band clears the hero figure: inner edge at r=58.
-const DIAL = { cx: 112, cy: 112, outer: 100, step: 18, poolWidth: 13, windowWidth: 8 };
+// ── identity ─────────────────────────────────────────────────────────────
 
 // Colour follows the provider, never its rank or its current severity — a
 // provider keeps its hue whether it is at 4% or 104%.
@@ -161,7 +156,6 @@ const PROVIDER_HUE = {
   claude: 'var(--brand-claude)',
   codex: 'var(--brand-codex)',
 };
-const SPARE_HUES = ['var(--brand-4)', 'var(--brand-5)', 'var(--brand-6)'];
 
 function resetText(epoch) {
   if (!known(epoch)) return 'Reset time unavailable';
@@ -344,33 +338,10 @@ function providerBands() {
 }
 
 /** SVG arc path from 0deg (12 o'clock) clockwise through `sweep` degrees. */
-function arcPath(cx, cy, r, sweep) {
-  const point = (deg) => {
-    const a = ((deg - 90) * Math.PI) / 180;
-    return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
-  };
-  const [x1, y1] = point(0);
-  const [x2, y2] = point(sweep);
-  return `M${x1.toFixed(2)} ${y1.toFixed(2)} A${r} ${r} 0 ${sweep > 180 ? 1 : 0} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}`;
-}
-
-// ── overview ──────────────────────────────────────────────────────────────
-// Compact by default: one ring per provider for the window that is live now,
-// every other window and pool as a bar beneath it, and a line saying where
-// there is room to work. Expanded keeps those rings and adds each provider's
-// verdict in full, the watch list, and the cycle's own figures.
-
-const OVERVIEW_RING = { compact: 92, expanded: 104 };
-
-function overviewMode() {
-  return state.overviewMode === 'expanded' ? 'expanded' : 'compact';
-}
-
-function setOverviewMode(mode) {
-  state.overviewMode = mode;
-  try { localStorage.setItem('overviewMode', mode); } catch { /* preference is optional */ }
-  paintOverview();
-}
+// ── provider summaries ──────────────────────────────────────────────────
+// One summary per provider — its live window, every other window as a
+// bar, and how long it lasts at the current rate. Limits & resets has its
+// own charts for the numbers; these feed only the notification bell.
 
 /** The Cursor billing cycle and its pools, reduced to what the overview needs. */
 function cursorSummary() {
@@ -484,102 +455,6 @@ function overviewAdvice(summaries) {
   return sentences.flatMap((parts, i) => (i ? [' ', ...parts] : parts));
 }
 
-function ringFigure(value, label, size, maxxed) {
-  const radius = size / 2 - 7;
-  const circumference = 2 * Math.PI * radius;
-  const svg = svgEl('svg', { width: size, height: size, viewBox: `0 0 ${size} ${size}`, 'aria-hidden': 'true' });
-  svg.append(svgEl('circle', { cx: size / 2, cy: size / 2, r: radius, class: 'ov-ring-track', 'stroke-width': 10 }));
-  if (known(value)) {
-    svg.append(svgEl('circle', {
-      cx: size / 2, cy: size / 2, r: radius, 'stroke-width': 10,
-      class: `ov-ring-arc${maxxed ? ' is-maxxed' : ''}`,
-      'stroke-dasharray': `${Math.max(0, (circumference * Math.min(100, Math.max(0, value))) / 100 - 0.1)} ${circumference}`,
-    }));
-  }
-  return el('div', { class: 'ov-ring' }, [
-    svg,
-    el('div', { class: 'ov-ring-mid' }, [
-      known(value) ? el('b', {}, [reading(Math.min(999, value)), el('small', { text: '%' })]) : el('b', { class: 'is-off', text: '—' }),
-      el('span', { text: label || '' }),
-    ]),
-  ]);
-}
-
-function overviewChip(summary) {
-  if (summary.unavailable) return el('span', { class: 'ov-chip', vars: { '--s': 'var(--off)' }, text: 'Unavailable' });
-  const p = summary.pace;
-  if (!p) return null;
-  const hot = p.status === 'fast' || p.status === 'ahead';
-  return el('span', {
-    class: 'ov-chip', vars: { '--s': SEVERITY[PACE_SEVERITY[p.status]] },
-    text: hot ? `${times(p.multiplier)}× pace` : PACE_BADGE[p.status].toLowerCase(),
-  });
-}
-
-function overviewWhen(summary) {
-  if (summary.unavailable) return summary.unavailable;
-  const p = summary.pace;
-  const reset = known(summary.resetAt) ? `resets ${momentText(summary.resetAt, summary.span)}` : 'reset time unavailable';
-  if (p && projection(p).runsOut && p.status !== 'exhausted') return `dry in ${duration(p.runsOutIn)} · ${reset}`;
-  if (p && p.status === 'exhausted') return `out · ${reset}`;
-  return `${remainingTime(summary.resetAt)} left · ${reset}`;
-}
-
-function overviewBar(bar) {
-  return el('div', { class: 'ov-bar' }, [
-    el('span', { class: 'ov-bar-name', text: bar.name }),
-    el('span', { class: `ov-bar-val${bar.maxxed ? ' is-maxxed' : ''}`, text: `${pct(bar.value)}${bar.maxxed ? ' ✦' : ''}` }),
-    el('span', { class: 'ov-bar-rail', vars: { '--w': Math.min(100, Math.max(0, bar.value || 0)), '--even': known(bar.even) ? Math.min(100, Math.max(0, bar.even)) : -5 } }, [
-      el('i', { class: bar.maxxed ? 'is-maxxed' : null }),
-      known(bar.even) ? el('b', { title: `${pct(bar.even)} would be even pace` }) : null,
-    ]),
-  ]);
-}
-
-/** Compact: ring, verdict, countdown, then every other window as a bar. */
-function overviewCluster(summary) {
-  return el('button', {
-    type: 'button', class: 'ovc', vars: { '--c': summary.hue },
-    title: `Open ${summary.label} detail`, onclick: summary.onOpen,
-  }, [
-    ringFigure(summary.ring.value, summary.ring.label, OVERVIEW_RING.compact, summary.ring.value >= 100),
-    el('div', { class: 'ovc-head' }, [el('span', { class: 'ovc-name', text: summary.label }), overviewChip(summary)]),
-    el('div', { class: 'ovc-when', text: overviewWhen(summary) }),
-    el('div', { class: 'ovc-bars' }, summary.bars.map(overviewBar)),
-  ]);
-}
-
-/** Expanded: the same ring with the verdict spelled out. */
-function overviewCard(summary) {
-  const p = summary.pace;
-  const proj = p ? projection(p) : null;
-  const headline = summary.unavailable ? 'Unavailable'
-    : p && proj.runsOut && p.status !== 'exhausted' ? `Runs dry in ${duration(p.runsOutIn)}`
-    : p && p.status === 'exhausted' ? 'Out until the reset'
-    : `${remainingTime(summary.resetAt)} of ${summary.ring.label} left`;
-  const detail = summary.unavailable ? summary.unavailable
-    : p ? paceSentence(p) : 'No pace yet: this window reports no reset time.';
-  return el('article', { class: 'ovp', vars: { '--c': summary.hue } }, [
-    el('div', { class: 'ovp-head' }, [
-      el('span', { class: 'prov-mark' }, [icon(PROVIDER_GLYPH[summary.id], 18)]),
-      el('div', {}, [
-        el('div', { class: 'ovp-name', text: summary.label }),
-        el('div', { class: 'ovp-note', text: summary.note }),
-      ]),
-      overviewChip(summary),
-    ]),
-    el('div', { class: 'ovp-body' }, [
-      ringFigure(summary.ring.value, summary.ring.label, OVERVIEW_RING.expanded, summary.ring.value >= 100),
-      el('div', { class: 'ovp-facts' }, [
-        el('div', { class: `ovp-headline${p && proj?.runsOut ? ' is-warn' : ''}`, text: headline }),
-        el('div', { class: 'ovp-detail', text: detail }),
-      ]),
-    ]),
-    summary.bars.length ? el('div', { class: 'ovp-bars' }, summary.bars.map(overviewBar)) : null,
-    el('div', { class: 'ovp-foot' }, summary.foot.filter(Boolean).map(text => el('span', { text }))),
-  ]);
-}
-
 /** Only what is actually biting, once each, worst first. */
 function watchRows(summaries) {
   const rows = [];
@@ -608,76 +483,6 @@ function watchRows(summaries) {
     });
   }
   return rows.sort((a, b) => a.sort - b.sort);
-}
-
-function cycleStats(report, full) {
-  const end = report.cycle_end ? Date.parse(report.cycle_end) / 1000 : null;
-  const stat = (value, unit, label, note) => el('div', { class: `ov-stat${full ? ' card' : ''}` }, [
-    el('b', {}, [value, unit && el('small', { text: unit })]),
-    el('span', { text: label }),
-    full && note ? el('span', { class: 'sub', text: note }) : null,
-  ]);
-  return el('div', { class: `ov-stats${full ? '' : ' is-mini'}` }, [
-    stat(money(report.total_spend_cents, 0), null, full ? 'Cursor reported spend' : 'cycle spend',
-      `${money(report.included_cents, 0)} included · ${money(report.bonus_cents, 0)} bonus`),
-    stat(known(report.burn_cents_per_day) ? money(report.burn_cents_per_day, 0) : '—', '/day', full ? 'average so far' : 'average',
-      'reported spend ÷ elapsed cycle days'),
-    stat(compact(report.agg_cache_read), null, full ? 'cache read tokens' : 'cache read',
-      `${compact(report.agg_input)} in · ${compact(report.agg_output)} out`),
-    full ? stat(compact(report.events_fetched), null, 'recorded events',
-      report.events_complete ? 'complete history' : `of ${compact(report.events_total)} · incomplete`) : null,
-    stat(known(end) ? remainingTime(end) : '—', null, full ? 'until the cycle resets' : 'cycle resets',
-      known(end) ? momentText(end, 30 * 86400) : 'not returned by Cursor'),
-  ]);
-}
-
-function topRuns(report, count) {
-  const runs = (report.conversations || []).slice(0, count);
-  if (!report.events_complete || !runs.length) return null;
-  return el('article', { class: 'card' }, [
-    el('span', { class: 'kicker', text: 'Top runs this cycle' }),
-    el('div', { class: 'runs ov-runs' }, runs.map(row => el('div', { class: 'run' }, [
-      el('span', { class: `run-dot${row.headless ? ' is-cloud' : ''}` }),
-      el('span', { class: 'run-name', text: row.name, title: row.name }),
-      el('span', { class: 'run-cost', text: `${compact(row.n)} event${row.n === 1 ? '' : 's'} · ${money(row.cents)}` }),
-    ]))),
-  ]);
-}
-
-function renderOverviewCompact(host, extra, summaries) {
-  host.append(el('div', { class: 'ov-compact' }, summaries.map(overviewCluster)));
-  const report = state.cycle;
-  if (!report) return;
-  extra.append(cycleStats(report, false));
-  const runs = topRuns(report, 3);
-  if (runs) extra.append(runs);
-}
-
-function renderOverviewExpanded(host, extra, summaries) {
-  host.append(el('div', { class: 'ov-cards' }, summaries.map(overviewCard)));
-  const report = state.cycle;
-  if (!report) return;
-  extra.append(cycleStats(report, true));
-  const runs = topRuns(report, 6);
-  if (runs) {
-    runs.append(el('p', { class: 'tile-note', text: 'Event-reported usage values from Cursor usage history, not cash charges.' }));
-    extra.append(runs);
-  }
-}
-
-function renderOverview() {
-  const mode = overviewMode();
-  const host = $('overviewBody');
-  const extra = $('overviewExtra');
-  host.replaceChildren();
-  extra.replaceChildren();
-  for (const button of document.querySelectorAll('#overviewMode [data-mode]')) {
-    button.setAttribute('aria-checked', String(button.dataset.mode === mode));
-  }
-  const summaries = overviewSummaries();
-  if (mode === 'compact') renderOverviewCompact(host, extra, summaries);
-  else renderOverviewExpanded(host, extra, summaries);
-  renderBell(summaries);
 }
 
 // ── notifications ─────────────────────────────────────────────────────────
@@ -1182,25 +987,6 @@ function pickRequest(index) {
 }
 
 function renderSessionControls(provider, followsOpen, isAuto) {
-  try {
-    const saved = localStorage.getItem('overviewMode');
-    if (saved === 'compact' || saved === 'expanded') state.overviewMode = saved;
-  } catch { /* preference is optional */ }
-  for (const button of document.querySelectorAll('#overviewMode [data-mode]')) {
-    button.addEventListener('click', () => setOverviewMode(button.dataset.mode));
-  }
-  $('btnBell').addEventListener('click', (event) => {
-    event.stopPropagation();
-    setBellOpen(!bellOpen());
-  });
-  document.addEventListener('click', (event) => {
-    if (bellOpen() && !event.target.closest('#bellPanel, #btnBell')) setBellOpen(false);
-  });
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && bellOpen()) setBellOpen(false);
-  });
-  window.hud.on('updateStatus', (value) => { state.update = value; renderBell(); });
-  window.hud.updateStatus().then((value) => { state.update = value; renderBell(); }).catch(() => {});
   for (const chip of document.querySelectorAll('#sessionProviders [data-provider]')) {
     chip.setAttribute('aria-checked', String(chip.dataset.provider === state.sessionProvider));
     if (chip.dataset.provider === 'auto') chip.textContent = isAuto && state.autoDetected ? `Auto · ${provider === 'claude' ? 'Claude Code' : 'Codex'}` : 'Auto';
@@ -1289,7 +1075,7 @@ async function startProviderLink(id) {
     state.links[id] = {provider:id,status:'error',message:engineMessage(error)};
   }
   renderResets();
-  paintOverview();
+  paintStatus();
 }
 
 function connectionControls(id, label, connected) {
@@ -1336,7 +1122,7 @@ function handleLinkState(link) {
     refreshProviders(true);
   }
   renderResets();
-  paintOverview();
+  paintStatus();
 }
 
 // Each window is a Material 3 card after Android's Data usage meter: the
@@ -1675,25 +1461,24 @@ function positionThumb() {
 
 // ── data flow ─────────────────────────────────────────────────────────────
 
-function paintOverview() {
-  renderOverview();
+function paintStatus() {
   const report = state.cycle;
   const age = known(report?.fetched_at) ? Date.now()/1000-report.fetched_at : Infinity;
   const stale = state.cycleError || report?.stale || age > 300;
-  $('cycleMeta').textContent = report ? `${stale ? 'Last known' : 'Cursor snapshot'} · ${relativeTime(report.fetched_at)}` : 'No Cursor snapshot';
   $('brandSub').textContent = report ? `Cursor ${report.plan || ''}${report.email ? ` · ${report.email}` : ''}` : 'Provider-reported usage';
   $('statusEvents').textContent = report ? `${compact(report.events_fetched)} / ${compact(report.events_total)} events${report.events_complete ? '' : ' · incomplete'}` : '';
   if (state.fetching) setStatus('off','Refreshing Cursor data…');
   else if (state.cycleError) setStatus('now',`Cursor refresh failed · last snapshot ${relativeTime(report?.fetched_at)}`);
   else if (report) setStatus(stale || !report.events_complete ? 'soon' : 'ok', `Cursor ${stale ? 'stale' : 'snapshot'} · ${relativeTime(report.fetched_at)}${report.events_complete ? '' : ' · event history incomplete'}`);
   else setStatus('off','Waiting for Cursor data');
+  renderBell();
 }
 
 async function refreshCycle(force = false) {
   if (state.fetching) return;
   state.fetching = true;
   $('btnRefresh').classList.add('is-spinning');
-  paintOverview();
+  paintStatus();
   try {
     state.cycle = await window.hud.call('cycle',{force});
     state.cycleError = null;
@@ -1705,7 +1490,7 @@ async function refreshCycle(force = false) {
   } finally {
     state.fetching = false;
     $('btnRefresh').classList.remove('is-spinning');
-    paintOverview();
+    paintStatus();
     renderResets();
     renderChat();
   }
@@ -1727,7 +1512,7 @@ async function refreshProviders(force = false) {
   } finally {
     state.providersFetching = false;
     renderResets();
-    paintOverview();
+    paintStatus();
     if (state.providersRefreshPending) {
       state.providersRefreshPending = false;
       refreshProviders(true);
@@ -1791,7 +1576,7 @@ async function refreshLocal() {
 function tickClocks() {
   if (document.activeElement?.closest('.provider-connection')) return;
   renderResets();
-  paintOverview();
+  paintStatus();
 }
 
 function showResetAlert(alert) {
@@ -1823,6 +1608,19 @@ async function boot() {
   for (const tab of document.querySelectorAll('[role="tab"]')) {
     tab.addEventListener('click', () => selectView(tab.id.replace('tab-', '')));
   }
+
+  $('btnBell').addEventListener('click', (event) => {
+    event.stopPropagation();
+    setBellOpen(!bellOpen());
+  });
+  document.addEventListener('click', (event) => {
+    if (bellOpen() && !event.target.closest('#bellPanel, #btnBell')) setBellOpen(false);
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && bellOpen()) setBellOpen(false);
+  });
+  window.hud.on('updateStatus', (value) => { state.update = value; renderBell(); });
+  window.hud.updateStatus().then((value) => { state.update = value; renderBell(); }).catch(() => {});
 
   $('btnRefresh').addEventListener('click', () => { refreshCycle(true); refreshProviders(true); });
   $('btnPin').addEventListener('click', async () => {
@@ -1921,7 +1719,7 @@ async function boot() {
     const cached = await window.hud.call('cached_cycle');
     if (cached) {
       state.cycle = cached;
-      paintOverview();
+      paintStatus();
     }
   } catch {
     /* no cache yet */
@@ -1929,7 +1727,7 @@ async function boot() {
 
   await refreshLocal();
   refreshProviders(false);
-  paintOverview();
+  paintStatus();
   refreshCycle(true);
 
   setInterval(tickClocks, POLL.clock);
@@ -1958,7 +1756,7 @@ window.hud.on('down', ({ code }) => {
   state.providersError = `Usage engine stopped (${code}). Reopen TOKENMAXXING.`;
   state.cycleError = state.providersError;
   state.local = {available:false,reason:state.providersError};
-  paintOverview();
+  paintStatus();
   renderResets();
   renderChat();
 });

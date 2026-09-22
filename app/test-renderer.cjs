@@ -202,7 +202,7 @@ test('a held reading keeps its arc and says it is being held', () => {
 test('a failed refresh keeps the previous snapshot on screen', async () => {
   const run = renderer();
   run(`state.providers={providers:[{id:'claude',status:'ok',source:'test',fetched_at:Date.now()/1000,windows:[{id:'five_hour',label:'5-hour',used_percent:64,window_minutes:300,resets_at:Date.now()/1000+3600}]}]}`);
-  run(`renderResets = () => {}; paintOverview = () => {};
+  run(`renderResets = () => {}; paintStatus = () => {};
     window.hud.call=async()=>{throw new Error('engine busy')}`);
   await run(`refreshProviders(true)`);
   assert.equal(run(`state.providers.providers[0].windows[0].used_percent`),64);
@@ -249,7 +249,7 @@ test('a forced refresh during polling is queued and replaces the old account sna
   const run = renderer();
   run(`
     renderResets = () => {};
-    paintOverview = () => {};
+    paintStatus = () => {};
     const refreshCalls = [];
     const completions = [];
     window.hud.call = (command, args) => {

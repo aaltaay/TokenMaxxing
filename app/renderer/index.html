@@ -54,9 +54,8 @@
 
   <nav class="segmented" role="tablist" aria-label="Views">
     <span class="segmented-thumb" id="segThumb" aria-hidden="true"></span>
-    <button role="tab" id="tab-overview" aria-controls="view-overview" aria-selected="true">Overview</button>
+    <button role="tab" id="tab-resets" aria-controls="view-resets" aria-selected="true">Limits & resets</button>
     <button role="tab" id="tab-chat" aria-controls="view-chat" aria-selected="false">Sessions</button>
-    <button role="tab" id="tab-resets" aria-controls="view-resets" aria-selected="false">Limits & resets</button>
     <button role="tab" id="tab-guide" aria-controls="view-guide" aria-selected="false">Model guide</button>
   </nav>
 
@@ -76,25 +75,6 @@
   </div>
 
   <main class="views">
-
-    <!-- ── Overview ──────────────────────────────────────────────────── -->
-    <section class="view is-active" id="view-overview" role="tabpanel" aria-labelledby="tab-overview">
-
-      <div class="card">
-        <div class="card-head">
-          <h2>Usage</h2>
-          <div class="seg-mini" id="overviewMode" role="radiogroup" aria-label="Overview detail">
-            <button type="button" role="radio" data-mode="compact" aria-checked="true">Compact</button>
-            <button type="button" role="radio" data-mode="expanded" aria-checked="false">Expanded</button>
-          </div>
-          <span class="meta" id="cycleMeta">—</span>
-        </div>
-        <div id="overviewBody"></div>
-      </div>
-
-      <div id="overviewExtra"></div>
-
-    </section>
 
     <!-- ── This chat ─────────────────────────────────────────────────── -->
     <section class="view" id="view-chat" role="tabpanel" aria-labelledby="tab-chat">
@@ -121,7 +101,7 @@
     </section>
 
     <!-- ── Resets ────────────────────────────────────────────────────── -->
-    <section class="view" id="view-resets" role="tabpanel" aria-labelledby="tab-resets">
+    <section class="view is-active" id="view-resets" role="tabpanel" aria-labelledby="tab-resets">
       <div class="resets-intro">
         <div class="resets-legend">
           <span><i class="sw sw-line"></i>Average so far</span>

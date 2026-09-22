@@ -172,8 +172,6 @@ body.is-mac .titlebar { --titlebar-inset: 84px; }
 .views::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.22); background-clip: content-box; }
 
 .view { display: none; flex-direction: column; gap: 14px; max-width: 820px; margin: 0 auto; }
-/* The overview lays provider columns side by side, so it takes the width. */
-#view-overview { max-width: 1400px; }
 .view.is-active { display: flex; }
 
 /* ── cards ─────────────────────────────────────────────────────────────── */
@@ -198,103 +196,6 @@ body.is-mac .titlebar { --titlebar-inset: 84px; }
   color: var(--ink-3);
 }
 
-/* ── overview ──────────────────────────────────────────────────────────── */
-/* Compact by default: one ring per provider with its other windows as bars
-   underneath. Expanded spells each provider out in a card. Provider hue is
-   identity; amber only marks a pool that is spent or a rate that will not
-   last. */
-
-.seg-mini { display: inline-flex; gap: 2px; margin-left: auto; padding: 2px; border-radius: 9px; background: rgba(255, 255, 255, 0.06); }
-.seg-mini button { padding: 4px 11px; border-radius: 7px; font-size: 11.5px; font-weight: 500; color: var(--ink-3); transition: background 0.15s var(--ease), color 0.15s var(--ease); }
-.seg-mini button:hover { color: var(--ink); }
-.seg-mini button[aria-checked="true"] { background: var(--raised); color: var(--ink); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4); }
-.card-head .seg-mini + .meta { margin-left: 12px; }
-
-.ov-ring { position: relative; flex: none; }
-.ov-ring svg { display: block; transform: rotate(-90deg); }
-.ov-ring-track { fill: none; stroke: color-mix(in srgb, var(--c) 18%, transparent); }
-.ov-ring-arc { fill: none; stroke: var(--c); stroke-linecap: round; transition: stroke-dasharray 0.5s var(--ease); }
-/* Reaching the ceiling is the point of this app, so a full ring glows
-   rather than turning into an alarm colour. */
-.ov-ring-arc.is-maxxed { stroke-linecap: butt; filter: drop-shadow(0 0 7px var(--c)); }
-.ov-ring-mid { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; }
-.ov-ring-mid b { font-size: 23px; font-weight: 600; line-height: 1; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
-.ov-ring-mid b small { font-size: 12px; font-weight: 500; color: var(--ink-2); }
-.ov-ring-mid b.is-off { color: var(--ink-4); }
-.ov-ring-mid span { display: block; margin-top: 2px; font-size: 9.5px; color: var(--ink-3); }
-
-/* compact cluster */
-.ov-compact { display: grid; grid-template-columns: repeat(auto-fit, minmax(268px, 1fr)); gap: 12px 26px; }
-.ovc {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  /* Spare height goes to the bars, so every ring sits on the same line
-     however many bars a provider has. */
-  grid-template-rows: auto auto 1fr;
-  align-items: center; gap: 3px 14px;
-  padding: 6px 8px 8px;
-  margin: -6px -8px -8px;
-  border-radius: 14px;
-  text-align: left;
-  transition: background 0.15s var(--ease);
-}
-.ovc:hover { background: rgba(255, 255, 255, 0.035); }
-.ovc .ov-ring { grid-row: 1 / span 2; }
-.ovc-head, .ovc-when { min-height: 18px; }
-.ovc-head { align-self: end; display: flex; align-items: center; gap: 8px; min-width: 0; }
-.ovc-name { font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em; }
-.ovc-when { grid-column: 2; align-self: start; font-size: 11px; color: var(--ink-3); }
-.ovc-bars { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; margin-top: 10px; min-height: 17px; }
-.ov-chip {
-  display: inline-flex; align-items: center; height: 20px; padding: 0 7px;
-  border-radius: 6px;
-  font-size: 10.5px; font-weight: 700;
-  white-space: nowrap;
-  color: color-mix(in srgb, var(--s) 84%, #fff);
-  background: color-mix(in srgb, var(--s) 15%, transparent);
-}
-
-.ov-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; font-size: 11px; }
-.ov-bar-name { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ov-bar-val { font-weight: 600; color: var(--ink-2); font-variant-numeric: tabular-nums; }
-.ov-bar-val.is-maxxed { color: var(--now); }
-.ov-bar-rail { grid-column: 1 / -1; position: relative; height: 5px; border-radius: 99px; background: color-mix(in srgb, var(--c) 16%, transparent); }
-.ov-bar-rail i { position: absolute; top: 0; bottom: 0; left: 0; width: calc(var(--w) * 1%); border-radius: 99px; background: var(--c); }
-.ov-bar-rail i.is-maxxed { background: var(--now); }
-/* The even-pace mark, same meaning as on the Limits bars. */
-.ov-bar-rail b { position: absolute; top: -2px; bottom: -2px; left: calc(var(--even) * 1%); width: 2px; margin-left: -1px; border-radius: 1px; background: var(--ink); opacity: 0.7; }
-
-/* expanded */
-.ov-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
-.ovp { display: flex; flex-direction: column; gap: 13px; padding: 15px; border-radius: 16px; background: var(--raised); }
-.ovp-head { display: flex; align-items: center; gap: 11px; }
-.ovp-head .prov-mark { width: 34px; height: 34px; border-radius: 11px; }
-.ovp-head .ov-chip { margin-left: auto; height: 24px; padding: 0 9px; font-size: 11px; }
-.ovp-name { font-size: 14.5px; font-weight: 600; letter-spacing: -0.01em; }
-.ovp-note { font-size: 11px; color: var(--ink-3); }
-.ovp-body { display: flex; align-items: center; gap: 15px; }
-.ovp-facts { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.ovp-headline { font-size: 18px; font-weight: 600; line-height: 1.25; letter-spacing: -0.02em; }
-.ovp-headline.is-warn { color: var(--now); }
-.ovp-detail { font-size: 11.5px; line-height: 1.5; color: var(--ink-2); }
-.ovp-bars { display: flex; flex-direction: column; gap: 7px; padding-top: 12px; border-top: 1px solid var(--hairline); }
-.ovp-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 11px; color: var(--ink-3); }
-
-.ov-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
-.ov-stat { display: flex; flex-direction: column; gap: 2px; }
-.ov-stat b { font-size: 23px; font-weight: 600; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
-.ov-stat b small { margin-left: 2px; font-size: 13px; font-weight: 500; color: var(--ink-2); }
-.ov-stat > span { font-size: 11.5px; color: var(--ink-3); }
-.ov-stat .sub { margin-top: 3px; font-size: 11px; color: var(--ink-4); }
-.ov-runs { margin-top: 8px; }
-#overviewExtra { display: flex; flex-direction: column; gap: 14px; }
-#overviewExtra:empty { display: none; }
-/* Compact keeps the cycle figures as a row of small tiles. */
-.ov-stats.is-mini { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
-.ov-stats.is-mini .ov-stat { padding: 11px 13px; border-radius: 14px; background: var(--card); border: 1px solid var(--hairline); }
-.ov-stats.is-mini .ov-stat b { font-size: 17px; }
-.ov-stats.is-mini .ov-stat > span { font-size: 10.5px; }
-
 .chip {
   padding: 4px 11px;
   font-size: 11px;
@@ -307,17 +208,6 @@ body.is-mac .titlebar { --titlebar-inset: 84px; }
 .chip:hover { background: rgba(255, 255, 255, 0.09); color: var(--ink); }
 .chip-primary { background: var(--accent); border-color: transparent; color: #fff; }
 .chip-primary:hover { background: #4b93e8; color: #fff; }
-
-.all-clear {
-  display: flex; align-items: center; gap: 10px;
-  padding: 12px 15px;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--hairline);
-  background: var(--card);
-  font-size: 12.5px;
-  color: var(--ink-2);
-}
-.all-clear svg { color: var(--ok); flex: none; }
 
 /* ── shared notes ──────────────────────────────────────────────────────── */
 
