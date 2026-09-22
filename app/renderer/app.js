@@ -38,8 +38,6 @@ const state = {
   autoActive: false,
   focus: null,
   view: 'overview',
-  // Limits cards the user has opened, kept across the clock re-renders.
-  openWindows: new Set(),
   // Overview detail: compact rings, or every provider spelled out.
   overviewMode: 'compact',
   // What the bell badge reflects besides alerts: a waiting update and the
@@ -1408,93 +1406,16 @@ function rateShort(perHour, total) {
 }
 
 /** The one-line answer on the card and the headline inside it. */
-function paceStory(p, resetAt) {
-  const reset = momentText(resetAt, p.total);
-  const proj = projection(p);
-  const rate = rateShort(p.allowedPerHour, p.total);
-  if (p.status === 'exhausted') return {
-    foot: `Out of quota until **${reset}**`,
-    headline: ['Back at ', reset, 'now'],
-    support: `Limit reached. Nothing left for **${duration(p.remaining)}**.`,
-  };
-  if (p.status === 'early') return {
-    foot: 'Too early to judge pace',
-    headline: ['Just getting started'],
-    support: `**${pct(p.used)}** used so far; pace settles once more of the window has passed. Resets ${reset}, in **${duration(p.remaining)}**.`,
-  };
-  if (proj.runsOut) {
-    const outEpoch = Date.now() / 1000 + p.runsOutIn;
-    const today = new Date(outEpoch * 1000).toDateString() === new Date().toDateString() && p.total < 14 * 86400;
-    return {
-      foot: `Runs dry **${duration(p.early)}** before the reset`,
-      headline: [today ? 'Runs out at ' : 'Runs out ', momentText(outEpoch, p.total), p.status === 'on-pace' ? null : 'now'],
-      support: `In **${duration(p.runsOutIn)}**, **${duration(p.early)}** before the ${reset} reset. Stay under **${rate}** to make it.`,
-    };
-  }
-  const spare = 100 - proj.end;
-  if (p.status === 'spare') return {
-    foot: `**${pct(spare)}** will go unused at this rate`,
-    headline: ['', pct(spare), 'ok', ' will go unused'],
-    support: `This rate ends near **${pct(proj.end)}** at the ${reset} reset. Room for **${rate}**.`,
-  };
-  return {
-    foot: spare >= 1 ? `Lasts to the reset with **~${pct(spare)}** to spare` : 'Lasts right up to the reset',
-    headline: ['Lasts until ', 'the reset', 'ok'],
-    support: `This rate ends near **${pct(proj.end)}** at ${reset}. Room for **${rate}**.`,
-  };
-}
-
-function paceTiles(p) {
-  const proj = projection(p);
-  const hot = p.status === 'fast' || p.status === 'ahead';
-  const rate = rateParts(p.allowedPerHour, p.total);
-  const tile = (value, unit, label, tone) => el('div', { class: `wc-tile${tone ? ` is-${tone}` : ''}` }, [
-    el('b', {}, [value, unit && el('small', { text: unit })]),
-    el('span', { text: label }),
-  ]);
-  const pace = p.status === 'early'
-    ? tile('—', null, 'even pace')
-    : tile(times(p.multiplier), '×', 'even pace', hot ? 'hot' : known(p.multiplier) && p.multiplier <= 1 ? 'good' : null);
-  if (p.status === 'exhausted') {
-    const avg = rateParts(p.ratePerHour, p.total);
-    return [pace, tile('0', '%', 'left'), tile(avg ? avg.value : '—', avg && `%/${avg.unit}`, 'average rate')];
-  }
-  const second = p.status === 'early' ? tile('—', null, 'too early to project')
-    : proj.runsOut ? tile(duration(p.runsOutIn), null, 'until empty', hot ? 'hot' : null)
-    : tile(pct(proj.end).replace('%', ''), '%', 'at the reset');
-  return [pace, second, tile(rate ? rate.value : '—', rate && `%/${rate.unit}`, proj.runsOut ? 'rate that lasts' : 'room to last')];
-}
-
 function statusChip(p) {
+  const hot = p.status === 'fast' || p.status === 'ahead';
   return el('span', { class: 'status-chip', vars: { '--c': SEVERITY[PACE_SEVERITY[p.status]] } }, [
-    iconWithClass(PACE_ICON[p.status], '', 14),
-    PACE_BADGE[p.status],
-  ]);
-}
-
-/** Material 3 linear progress, with the even-pace mark and anything past
-    it striped: ahead of schedule reads before a word does. */
-function paceBar(used, p) {
-  const u = Math.min(100, Math.max(0, used));
-  const even = p ? Math.min(100, Math.max(0, p.expected)) : null;
-  const over = known(even) && u > even + 0.5;
-  return el('div', {
-    class: `wbar${u >= 97 ? ' is-full' : ''}`,
-    vars: { '--u': u, '--fill': over ? even : u, '--even': even ?? 0 },
-  }, [
-    el('div', { class: 'wbar-rail' }, [
-      el('i', { class: 'wbar-fill' }),
-      over && el('i', { class: 'wbar-over' }),
-      el('i', { class: 'wbar-rest' }),
-      el('b', { class: 'wbar-stop' }),
-    ]),
-    known(even) && el('i', { class: 'wbar-even' }),
-    known(even) && el('span', { class: 'wbar-label', text: `even pace ${pct(even)}` }),
+    iconWithClass(PACE_ICON[p.status], '', 13),
+    hot ? `${times(p.multiplier)}× pace` : PACE_BADGE[p.status],
   ]);
 }
 
 let projSeq = 0;
-function projectionChart(p, openedAt, resetAt) {
+function projectionChart(p, openedAt, resetAt, { legend = true } = {}) {
   const proj = projection(p);
   const e = p.elapsedFrac * 100;
   const u = Math.min(100, Math.max(0, p.used));
@@ -1522,8 +1443,10 @@ function projectionChart(p, openedAt, resetAt) {
   if (proj.runsOut) {
     const out = proj.outAt * 100;
     plot.prepend(el('div', { class: 'proj-lock', vars: { '--out': out } }));
-    const gap = p.status === 'exhausted' ? p.remaining : p.early;
-    if (100 - out >= 28) plot.append(el('span', { class: 'proj-lock-label', vars: { '--out': out }, text: `out of quota for ${duration(gap)}` }));
+    // With the headline gone, the label carries when it runs dry and for how long.
+    const text = p.status === 'exhausted' ? `out of quota for ${duration(p.remaining)}`
+      : `dry ${momentText(Date.now() / 1000 + p.runsOutIn, p.total)} · out ${duration(p.early)}`;
+    plot.append(el('span', { class: `proj-lock-label${100 - out < 45 ? ' is-edge' : ''}`, vars: { '--out': out }, text }));
     if (p.status !== 'exhausted') plot.append(el('i', { class: 'proj-dot is-out', vars: { '--x': out, '--y': 0 } }));
   } else if (known(proj.end)) {
     plot.append(el('i', { class: 'proj-dot is-end', vars: { '--x': 100, '--y': 100 - proj.end } }));
@@ -1544,7 +1467,7 @@ function projectionChart(p, openedAt, resetAt) {
       el('span', { text: openedText(openedAt, p.total) }),
       el('span', { text: `reset ${momentText(resetAt, p.total)}` }),
     ]),
-    el('div', { class: 'proj-legend' }, key.map(([cls, text]) => el('span', {}, [el('i', { class: `sw ${cls}` }), text]))),
+    legend && el('div', { class: 'proj-legend' }, key.map(([cls, text]) => el('span', {}, [el('i', { class: `sw ${cls}` }), text]))),
   ]);
 }
 
@@ -1553,6 +1476,10 @@ function projectionChart(p, openedAt, resetAt) {
     in the headline). */
 function settleChartLabels() {
   for (const plot of document.querySelectorAll('.proj-plot')) {
+    const val = plot.querySelector('.proj-val');
+    if (val && !val.classList.contains('is-right')) {
+      if (val.getBoundingClientRect().left < plot.getBoundingClientRect().left) val.classList.add('is-right');
+    }
     const value = plot.querySelector('.proj-val')?.getBoundingClientRect();
     const now = plot.querySelector('.proj-dot.is-now')?.getBoundingClientRect();
     const overlaps = (a, b) => Boolean(b) && a.left < b.right + 4 && a.right > b.left - 4 && a.top < b.bottom + 2 && a.bottom > b.top - 2;
@@ -1566,66 +1493,16 @@ function settleChartLabels() {
   }
 }
 
-let freshlyOpened = null;
-function toggleWindow(key) {
-  if (state.openWindows.has(key)) state.openWindows.delete(key);
-  else { state.openWindows.add(key); freshlyOpened = key; }
-  renderResets();
-}
-
-/** One window: the stat card, and when opened, the projection below it. */
-function windowCard({ key, name, used, p, openedAt, resetAt, span }) {
-  const live = known(used);
-  const open = Boolean(p) && state.openWindows.has(key);
-  const resetLine = known(resetAt) && resetAt > Date.now() / 1000 ? `Resets ${momentText(resetAt, span)}` : resetText(resetAt);
-  const card = el('article', {
-    class: `wc${open ? ' is-open' : ''}`,
-    'data-key': key,
-    role: p ? 'button' : null,
-    tabindex: p ? 0 : null,
-    'aria-expanded': p ? String(open) : null,
-    onclick: p ? () => toggleWindow(key) : null,
-    onkeydown: p ? (event) => {
-      if (event.key !== 'Enter' && event.key !== ' ') return;
-      event.preventDefault();
-      toggleWindow(key);
-    } : null,
-  }, [
+/** One window: its name, reset and verdict, then the projection. */
+function windowCard({ key, name, used, p, openedAt, resetAt }) {
+  const card = el('article', { class: 'wc is-chart', 'data-key': key }, [
     el('div', { class: 'wc-head' }, [
-      el('div', {}, [el('div', { class: 'wc-name', text: name }), el('div', { class: 'wc-when', text: resetLine })]),
+      el('div', { class: 'wc-title' }, [el('span', { class: 'wc-name', text: name })]),
       p && statusChip(p),
     ]),
-    el('div', { class: 'wc-hero' }, [
-      el('div', {}, [
-        live ? el('div', { class: 'wc-num' }, [reading(used), el('span', { class: 'u', text: '%' })])
-          : el('div', { class: 'wc-num is-small is-muted', text: 'Awaiting update' }),
-        el('div', { class: 'wc-num-label', text: 'used' }),
-      ]),
-      known(resetAt) && el('div', { class: 'is-right' }, [
-        el('div', { class: 'wc-num is-small', text: remainingTime(resetAt) }),
-        el('div', { class: 'wc-num-label', text: 'until reset' }),
-      ]),
-    ]),
-    live && paceBar(used, p),
   ]);
-  if (!p) return card;
-  const story = paceStory(p, resetAt);
-  card.append(
-    el('div', { class: 'wc-tiles' }, paceTiles(p)),
-    el('div', { class: 'wc-foot' }, [
-      iconWithClass(ICONS.clock, '', 15),
-      rich('span', '', story.foot),
-      el('span', { class: 'wc-more' }, [open ? 'Less' : 'Details', iconWithClass(ICONS.chevron, 'wc-chev', 15)]),
-    ]),
-  );
-  if (open) {
-    const [lead, em, tone, tail] = story.headline;
-    card.append(el('div', { class: `wc-details${freshlyOpened === key ? ' is-fresh' : ''}` }, [
-      el('div', { class: 'proj-headline' }, [lead, em && el('em', { class: tone ? `is-${tone}` : null, text: em }), tail]),
-      rich('div', 'proj-support', story.support),
-      projectionChart(p, openedAt, resetAt),
-    ]));
-  }
+  card.append(p ? projectionChart(p, openedAt, resetAt, { legend: false })
+    : el('div', { class: 'wc-empty', text: known(used) ? `${reading(used)}% used · ${resetText(resetAt).toLowerCase()}` : 'Awaiting update' }));
   return card;
 }
 
@@ -1650,81 +1527,24 @@ function budgetFigures(pair, session, week) {
   };
 }
 
-function sessionCells(perWeek, weeklyUsed) {
-  const n = Math.max(1, Math.min(24, Math.round(perWeek)));
-  const each = 100 / n;
-  return el('div', { class: 'budget-cells', role: 'img', 'aria-label': `${pct(weeklyUsed)} of the week used, about ${n} sessions in all` },
-    Array.from({ length: n }, (_, i) => el('i', { vars: { '--f': Math.min(1, Math.max(0, weeklyUsed / each - i)) } }, [el('b')])));
-}
-
-function surfaceShares(breakdown) {
-  const rows = (breakdown?.rows || []).filter(r => r.percent > 0);
-  if (!rows.length) return null;
-  const tones = ['var(--c)', 'var(--brand-6)', 'var(--brand-5)', 'var(--ink-3)'];
-  return el('div', { class: 'budget-surfaces' }, [
-    el('span', { class: 'kicker', text: 'This week by surface' }),
-    el('div', { class: 'budget-surface-bar' }, rows.map((r, i) => el('i', { vars: { '--w': r.percent, '--tone': tones[i % tones.length] } }))),
-    el('div', { class: 'proj-legend' }, rows.map((r, i) => el('span', {}, [
-      el('i', { class: 'sw budget-swatch', vars: { '--tone': tones[i % tones.length] } }), `${r.name} ${pct(r.percent)}`]))),
-  ]);
-}
-
-function budgetCard(provider, label) {
-  const pair = (provider.budget || []).find(b => b.status !== 'unrelated');
+/** How many full 5-hour sessions the rest of the week holds, as one chip. */
+function budgetChip(provider) {
+  const pair = (provider.budget || []).find(b => b.status === 'measured' && b.share > 0);
   if (!pair) return null;
   const session = provider.windows.find(w => w.id === pair.session);
   const week = provider.windows.find(w => w.id === pair.weekly);
   if (!week || !windowCurrent(week) || !known(week.used_percent)) return null;
-  const reset = momentText(week.resets_at, 7 * 86400);
-  const measured = pair.status === 'measured' && pair.share > 0;
-  const card = el('article', { class: 'wc budget' }, [
-    el('div', { class: 'wc-head' }, [
-      el('div', {}, [
-        el('div', { class: 'wc-name', text: 'Your week in 5-hour sessions' }),
-        el('div', { class: 'wc-when', text: `${week.label} limit · resets ${reset}` }),
-      ]),
-      el('span', { class: 'status-chip', vars: { '--c': measured ? 'var(--ok)' : 'var(--off)' } }, [
-        iconWithClass(measured ? ICONS.check : ICONS.clock, '', 14), measured ? 'Measured' : 'Measuring']),
-    ]),
+  const f = budgetFigures(pair, session, week);
+  const left = f.sessionsLeft < 10 ? f.sessionsLeft.toFixed(1) : String(Math.round(f.sessionsLeft));
+  return withTooltip(el('span', { class: 'prov-flag is-budget', tabindex: 0, text: `${left} of ~${Math.round(f.perWeek)} sessions left` }), () => [
+    el('b', { text: 'Your week in 5-hour sessions' }),
+    el('div', { class: 'muted', text: `One full 5-hour session uses about ${pct(f.perSession, f.perSession < 10 ? 1 : 0)} of the week, measured from your own readings.` }),
   ]);
-  if (measured) {
-    const f = budgetFigures(pair, session, week);
-    const left = f.sessionsLeft < 10 ? f.sessionsLeft.toFixed(1) : String(Math.round(f.sessionsLeft));
-    const per = pct(f.perSession, f.perSession < 10 ? 1 : 0);
-    card.append(
-      el('div', { class: 'wc-hero' }, [
-        el('div', {}, [el('div', { class: 'wc-num', text: left }), el('div', { class: 'wc-num-label', text: `full sessions left before ${reset}` })]),
-        el('div', { class: 'is-right' }, [el('div', { class: 'wc-num is-small', text: `≈ ${Math.round(f.perWeek)}` }), el('div', { class: 'wc-num-label', text: 'sessions a week' })]),
-      ]),
-      sessionCells(f.perWeek, week.used_percent),
-      rich('div', 'budget-line', `One full 5-hour session uses about **${per}** of the week, and **${pct(f.weeklyLeft)}** of it is left.`),
-      known(f.stopsAt)
-        ? rich('div', 'budget-line is-warn', `The weekly limit will stop this session at about **${pct(f.stopsAt)}**, before its own 5-hour limit.`)
-        : known(f.room) ? rich('div', 'budget-line', `Using the rest of this session (now ${pct(f.sessionUsed)}) would take about **${pct(f.room)}** of the week.`) : null,
-      el('div', { class: 'wc-tiles' }, [
-        el('div', { class: 'wc-tile' }, [el('b', {}, [per.replace('%', ''), el('small', { text: '%' })]), el('span', { text: 'of the week per session' })]),
-        el('div', { class: `wc-tile${known(f.stopsAt) ? ' is-hot' : ''}` }, [el('b', { text: left }), el('span', { text: 'sessions left' })]),
-        el('div', { class: 'wc-tile' }, [el('b', { text: remainingTime(week.resets_at) }), el('span', { text: 'until the week resets' })]),
-      ]),
-    );
-  } else {
-    const progress = Math.min(1, pair.session_points / pair.needed_session_points, pair.weekly_points / pair.needed_weekly_points);
-    card.append(
-      el('div', { class: 'budget-line', text: `Learning how much of the week one 5-hour session uses. ${label} reports the two limits separately and never says how they relate, so this is measured from your own readings as they come in.` }),
-      el('div', { class: 'meter budget-progress', vars: { '--w': progress * 100 } }, [el('i', { class: 'sess-context-fill' })]),
-      el('div', { class: 'wc-when', text: `${compact(pair.session_points)} of ${compact(pair.needed_session_points)} points of 5-hour movement seen · the weekly window moved ${compact(pair.weekly_points)} of the ${compact(pair.needed_weekly_points)} points needed` }),
-    );
-  }
-  const surfaces = surfaceShares(provider.breakdown);
-  if (surfaces) card.append(surfaces);
-  if (measured) card.append(el('div', { class: 'sess-notes' }, [el('p', {
-    text: `Measured from your own usage: ${compact(pair.session_points)} points of 5-hour movement and the ${compact(pair.weekly_points)} weekly points that moved with them${pair.cycles > 1 ? `, across ${pair.cycles} weeks` : ''}. Readings are whole percentages, so treat it as approximate.`,
-  })]));
-  return card;
 }
 
-function providerSection({ id, label, live, meta, warning, onRefresh, cards, note, lead }) {
+function providerSection({ id, label, live, meta, warning, onRefresh, cards, note, badge }) {
   const actions = el('div', { class: 'prov-actions' }, [
+    badge,
     warning && withTooltip(el('span', { class: 'prov-flag', tabindex: 0, text: 'Cached reading' }), () => [el('div', { text: warning })]),
     el('button', { class: 'icon-btn prov-refresh', type: 'button', title: 'Refresh usage', 'aria-label': `Refresh ${label} usage`, onclick: onRefresh }, [icon(ICONS.refresh, 16)]),
   ]);
@@ -1738,7 +1558,6 @@ function providerSection({ id, label, live, meta, warning, onRefresh, cards, not
       actions,
     ]),
     note,
-    lead,
     cards.length > 0 && el('div', { class: 'prov-grid' }, cards),
   ]);
 }
@@ -1799,12 +1618,11 @@ function renderResets() {
       warning: current && provider.warning ? `${provider.warning} Showing the reading from ${relativeTime(provider.fetched_at)}.` : null,
       onRefresh: () => refreshProviders(true),
       cards, note,
-      lead: current ? budgetCard(provider, label) : null,
+      badge: current ? budgetChip(provider) : null,
     }));
   }
   const cursor = cursorSection();
   if (cursor) host.append(cursor);
-  freshlyOpened = null;
   settleChartLabels();
   if (focused) host.querySelector(`[data-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
 }

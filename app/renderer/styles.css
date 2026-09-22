@@ -295,7 +295,6 @@ body.is-mac .titlebar { --titlebar-inset: 84px; }
 .ov-stats.is-mini .ov-stat b { font-size: 17px; }
 .ov-stats.is-mini .ov-stat > span { font-size: 10.5px; }
 
-
 .chip {
   padding: 4px 11px;
   font-size: 11px;
@@ -542,12 +541,9 @@ button.wc-tile { font: inherit; color: inherit; text-align: left; cursor: pointe
 .resets-legend, .proj-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; font-size: 11.5px; color: var(--ink-3); }
 .resets-legend > span, .proj-legend > span { display: inline-flex; align-items: center; gap: 7px; }
 .resets-legend .resets-now { margin-left: auto; color: var(--ink-4); font-variant-numeric: tabular-nums; }
-.resets-hint { margin: 0; font-size: 11.5px; color: var(--ink-4); }
 
 .sw { display: inline-block; flex: none; }
-.sw-used { width: 18px; height: 6px; border-radius: 3px; background: var(--ink-2); }
-.sw-even { width: 3px; height: 14px; border-radius: 2px; background: var(--ink); }
-.sw-over { width: 18px; height: 6px; border-radius: 3px; background: repeating-linear-gradient(135deg, var(--now) 0 3px, color-mix(in srgb, var(--now) 45%, transparent) 3px 6px); }
+
 .sw-line { width: 18px; border-top: 2.5px solid var(--ink-2); }
 .sw-dash { width: 18px; border-top: 2.5px dashed var(--ink-2); }
 .sw-dot { width: 18px; border-top: 2px dotted var(--ink-3); }
@@ -582,23 +578,32 @@ button.wc-tile { font: inherit; color: inherit; text-align: left; cursor: pointe
 .icon-btn.prov-refresh { width: 34px; height: 34px; border-radius: 50%; background: var(--raised); }
 .icon-btn.prov-refresh:hover { background: rgba(255, 255, 255, 0.12); }
 
-.prov-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 12px; }
+.prov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); gap: 10px; }
+#view-resets .prov-list { gap: 16px; }
+#view-resets .prov { gap: 8px; }
+#view-resets .prov-head .prov-mark { width: 28px; height: 28px; border-radius: 9px; }
+#view-resets .prov-title h2 { font-size: 14.5px; }
+#view-resets .icon-btn.prov-refresh { width: 28px; height: 28px; }
+#view-resets .prov-flag { height: 26px; padding: 0 10px; font-size: 11px; }
+.prov-flag.is-budget { color: var(--ink); background: color-mix(in srgb, var(--c) 16%, var(--raised)); cursor: help; }
+
+.wc.is-chart { gap: 0; padding: 11px 13px 9px; border-radius: 16px; }
+.wc.is-chart .wc-head { align-items: center; }
+.wc-title { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.wc.is-chart .wc-name { font-size: 13px; white-space: nowrap; }
+.wc.is-chart .wc-when { margin: 0; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wc.is-chart .status-chip { height: 22px; padding: 0 8px 0 6px; gap: 4px; font-size: 11px; border-radius: 7px; }
+.wc.is-chart .proj { margin-top: 0; }
+.wc.is-chart .proj-plot { height: 78px; margin-top: 18px; }
+.wc.is-chart .proj-axis { margin-top: 4px; font-size: 10.5px; }
+.wc.is-chart .proj-val { font-size: 12px; }
+.wc.is-chart .proj-lock-label { padding: 2px 8px; font-size: 10.5px; }
+/* In a small plot the projection line runs through this label; give it ground. */
+.wc.is-chart .proj-end { right: 4px; padding: 0 4px; border-radius: 4px; background: var(--card); font-size: 10.5px; }
+.wc-empty { padding: 26px 0 18px; font-size: 12px; color: var(--ink-3); text-align: center; }
 
 /* The week in 5-hour sessions: one cell per full session the week holds,
    filled as far as the weekly window has gone. */
-.budget-cells { display: flex; gap: 4px; height: 16px; }
-.budget-cells i { position: relative; flex: 1; overflow: hidden; border-radius: 5px; background: color-mix(in srgb, var(--c) 18%, var(--raised)); }
-.budget-cells b { position: absolute; inset: 0 auto 0 0; width: calc(var(--f) * 100%); background: var(--c); }
-.budget-line { font-size: 13px; line-height: 1.5; color: var(--ink-2); }
-.budget-line b { font-weight: 600; color: var(--ink); }
-.budget-line.is-warn { color: color-mix(in srgb, var(--now) 70%, var(--ink)); }
-.budget-line.is-warn b { color: var(--now); }
-.budget-progress { height: 8px; }
-.budget-surfaces { display: flex; flex-direction: column; gap: 7px; padding-top: 12px; border-top: 1px solid var(--hairline); }
-.budget-surfaces .proj-legend { margin-top: 0; }
-.budget-surface-bar { display: flex; gap: 3px; height: 8px; }
-.budget-surface-bar i { flex: var(--w) 1 0; min-width: 5px; border-radius: 4px; background: var(--tone); }
-.budget-swatch { width: 10px; height: 10px; border-radius: 3px; background: var(--tone); }
 
 /* window card */
 .wc {
@@ -632,43 +637,10 @@ button.wc-tile { font: inherit; color: inherit; text-align: left; cursor: pointe
   background: color-mix(in srgb, var(--c) 15%, transparent);
 }
 
-.wc-hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
-.wc-hero .is-right { text-align: right; }
 /* Hero figures: the reading and the countdown, at display size. */
-.wc-num { font-size: 44px; font-weight: 600; line-height: 1; letter-spacing: -0.035em; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.wc-num .u { margin-left: 1px; font-size: 23px; font-weight: 500; letter-spacing: -0.01em; color: var(--ink-2); }
-.wc-num.is-small { font-size: 28px; letter-spacing: -0.03em; }
-.wc-num.is-muted { font-size: 20px; color: var(--ink-3); }
-.wc-num-label { margin-top: 5px; font-size: 11.5px; font-weight: 500; color: var(--ink-3); }
 
 /* Material 3 linear progress: indicator, gap, track, stop dot. Anything
    past the even-pace mark is striped amber. */
-.wbar { position: relative; padding-bottom: 18px; }
-.wbar-rail { position: relative; height: 12px; }
-.wbar-rail > i { position: absolute; top: 0; bottom: 0; border-radius: 6px; }
-.wbar-fill { left: 0; width: calc(var(--fill) * 1%); background: var(--c); }
-.wbar-over {
-  left: calc(var(--even) * 1% - 6px);
-  width: calc((var(--u) - var(--even)) * 1% + 6px);
-  background: repeating-linear-gradient(135deg, var(--now) 0 4px, color-mix(in srgb, var(--now) 50%, var(--c)) 4px 8px);
-}
-.wbar-rest { left: calc(var(--u) * 1% + 4px); right: 0; background: color-mix(in srgb, var(--c) 20%, var(--raised)); }
-.wbar-stop { position: absolute; right: 3px; top: 4px; width: 4px; height: 4px; border-radius: 50%; background: var(--c); }
-.wbar.is-full .wbar-rest, .wbar.is-full .wbar-stop { display: none; }
-.wbar-even {
-  position: absolute; top: -4px; left: calc(var(--even) * 1%);
-  width: 3px; height: 20px; margin-left: -1.5px;
-  border-radius: 2px;
-  background: var(--ink);
-  box-shadow: 0 0 0 2px var(--card);
-}
-.wbar-label {
-  position: absolute; top: 19px;
-  left: clamp(44px, calc(var(--even) * 1%), calc(100% - 44px));
-  transform: translateX(-50%);
-  font-size: 11px; color: var(--ink-2);
-  white-space: nowrap;
-}
 
 .wc-tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .wc-tile { min-width: 0; padding: 10px 11px 9px; border-radius: 14px; background: var(--raised); }
@@ -684,23 +656,8 @@ button.wc-tile { font: inherit; color: inherit; text-align: left; cursor: pointe
 .wc-tile.is-hot b { color: var(--now); }
 .wc-tile.is-good b { color: color-mix(in srgb, var(--ok) 78%, #fff); }
 
-.wc-foot {
-  display: flex; align-items: center; gap: 7px;
-  margin-top: -2px; padding-top: 12px;
-  border-top: 1px solid var(--hairline);
-  font-size: 12px; color: var(--ink-2);
-}
-.wc-foot > svg { flex: none; color: var(--ink-3); }
-.wc-foot b { font-weight: 600; color: var(--ink); }
-.wc-more { margin-left: auto; display: inline-flex; align-items: center; gap: 3px; font-weight: 500; color: var(--ink-3); white-space: nowrap; }
-.wc[role="button"]:hover .wc-more { color: var(--ink); }
-.wc-chev { transition: transform 0.2s var(--ease); }
-.wc.is-open .wc-chev { transform: rotate(180deg); }
-
 /* opened: the projection */
-.wc-details { display: flex; flex-direction: column; gap: 4px; padding-top: 2px; }
-.wc-details.is-fresh { animation: reveal 0.28s var(--ease); }
-@keyframes reveal { from { opacity: 0; transform: translateY(-6px); } }
+
 .proj-headline { font-size: 28px; font-weight: 600; line-height: 1.2; letter-spacing: -0.025em; }
 .proj-headline em { font-style: normal; }
 .proj-headline em.is-now { color: var(--now); }
@@ -738,6 +695,7 @@ button.wc-tile { font: inherit; color: inherit; text-align: left; cursor: pointe
   color: var(--now);
   white-space: nowrap;
 }
+.proj-lock-label.is-edge { left: auto; right: 6px; transform: translateY(-50%); }
 .proj-dot {
   position: absolute;
   left: calc(var(--x) * 1%); top: calc(var(--y) * 1%);
