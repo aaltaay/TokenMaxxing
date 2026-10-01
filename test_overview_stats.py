@@ -82,6 +82,17 @@ class OverviewStatsTest(unittest.TestCase):
         self.assertEqual(tools['Shell'], 2)
         self.assertEqual((tools['Edit'], tools['Read'], tools['Browser'], tools['Search']), (1, 1, 1, 1))
 
+    def test_prompts_with_a_screenshot_attached_count_and_tool_results_do_not(self):
+        write(self.claude / 'p' / 'a.jsonl', [
+            prompt(0, [{'type': 'image', 'source': {}}, {'type': 'text', 'text': 'is this right?'}]),
+            prompt(10, [{'type': 'image', 'source': {}}]),
+            prompt(20, [{'type': 'tool_result', 'content': 'ok'}]),
+            prompt(30, [{'type': 'text', 'text': '<system-reminder>x</system-reminder>'}]),
+            assistant(40, 'x'),
+        ])
+        result = ov.overview(BASE - 10, now=BASE + 3600)
+        self.assertEqual(result['prompts'], 2)
+
     def test_idle_gaps_are_not_agent_time_and_old_logs_are_left_out(self):
         write(self.claude / 'p' / 'a.jsonl', [assistant(0, 'x'), assistant(ov.IDLE_GAP + 100, 'y')])
         old = self.claude / 'p' / 'old.jsonl'

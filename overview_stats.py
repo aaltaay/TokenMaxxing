@@ -53,6 +53,25 @@ def tool_group(name):
     return 'Other'
 
 
+def _typed(content):
+    """Whether a user record is a prompt you sent. One with a screenshot or
+    file attached arrives as a list of parts; so do tool results, which are
+    the agent's own work."""
+    if isinstance(content, str):
+        parts = [{'type': 'text', 'text': content}]
+    elif isinstance(content, list):
+        parts = [part for part in content if isinstance(part, dict)]
+    else:
+        return False
+    if any(part.get('type') == 'tool_result' for part in parts):
+        return False
+    # Slash commands, hook output and injected reminders are not you typing.
+    return any(part.get('type') in ('image', 'document')
+               or (part.get('type') == 'text' and str(part.get('text') or '').strip()
+                   and not str(part.get('text')).lstrip().startswith('<'))
+               for part in parts)
+
+
 def _intervals(times):
     out = []
     for t in sorted(times):
@@ -94,11 +113,8 @@ def _claude_facts(path):
                 for part in message.get('content') or []:
                     if isinstance(part, dict) and part.get('type') == 'tool_use':
                         tools[tool_group(part.get('name'))] += 1
-            elif (record.get('type') == 'user' and kind == 'session' and t is not None
-                  and not record.get('isMeta') and isinstance(message.get('content'), str)):
-                text = message['content'].lstrip()
-                # Slash commands, hook output and injected reminders are not you typing.
-                if text and not text.startswith('<'):
+            elif record.get('type') == 'user' and kind == 'session' and t is not None and not record.get('isMeta'):
+                if _typed(message.get('content')):
                     think = t - last_reply if last_reply and 0 < t - last_reply <= THINK_CAP else 0
                     prompts.append((t, think))
     return {'kind': kind, 'intervals': _intervals(times), 'prompts': prompts,

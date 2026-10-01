@@ -1624,7 +1624,9 @@ function overviewDesk(o) {
   const days = o.desk_days || [];
   if (!days.length) return null;
   const total = days.reduce((s, d) => s + d.hours, 0);
-  const avg = total / days.length;
+  // Averaged over the days you showed up; days with no prompts say nothing about a day's work.
+  const active = days.filter((d) => d.hours > 0).length;
+  const avg = active ? total / active : 0;
   const best = days.reduce((a, d) => (d.hours > (a?.hours || 0) ? d : a), null);
   const long = days.filter((d) => d.hours >= 12).length;
   let streak = 0;
@@ -1655,10 +1657,10 @@ function overviewDesk(o) {
   return el('div', { class: 'card ov-chart' }, [
     el('div', { class: 'ov-head' }, [
       el('h2', { text: 'Your time at the computer' }),
-      el('span', { class: 'ov-muted' }, [el('b', { text: spanText(total) }), ` over ${days.length} day${days.length === 1 ? '' : 's'}`]),
+      el('span', { class: 'ov-muted' }, [el('b', { text: spanText(total) }), ` on ${active} of ${days.length} day${days.length === 1 ? '' : 's'}`]),
     ]),
     el('div', { class: 'ov-desk-stats' }, [
-      stat('Average day', spanText(avg)),
+      stat('Average active day', spanText(avg)),
       best ? stat(`Longest · ${dayName(best.date, { weekday: 'short', month: 'short', day: 'numeric' })}`, spanText(best.hours), OV_HUE.you) : null,
       stat('Days over 12 h', String(long)),
       stat('Streak', `${streak} day${streak === 1 ? '' : 's'}`),
