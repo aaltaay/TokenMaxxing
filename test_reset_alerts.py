@@ -37,6 +37,13 @@ class AlertsTest(unittest.TestCase):
         state={}; cfg={'prewarn_enabled':False}
         self.assertEqual(ra.evaluate(self.snapshot(),cfg,state,10000),[])
         self.assertEqual(ra.evaluate(self.snapshot(now=10901,reset=28900),cfg,state,10901)[0]['phase'],'reset')
+    def test_a_reset_time_jittering_between_reads_alerts_once(self):
+        state={}
+        first=ra.evaluate(self.snapshot(reset=10899.2),{},state,10000)
+        self.assertEqual(len(first),1)
+        self.assertEqual(first[0]['label'],'Claude 5-hour')
+        self.assertEqual(first[0]['resets_at'],10899.2)
+        self.assertEqual(ra.evaluate(self.snapshot(now=10060,reset=10899.7),{},state,10060),[])
     def test_unobserved_window_does_not_invent_a_reset(self):
         self.assertEqual(ra.evaluate(self.snapshot(now=10901,reset=28900),{}, {},10901),[])
 

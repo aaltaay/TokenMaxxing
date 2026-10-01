@@ -10,6 +10,7 @@ const POLL = {
   due: 5000,       // buzz check
   local: 2000,     // Cursor sqlite snapshot
   cycle: 240000,   // dashboard fetch
+  overview: 60000, // agent-log totals; unchanged logs are served from cache
 };
 
 // Status colours. `maxxed` resolves to the provider's own hue at the call
@@ -37,7 +38,11 @@ const state = {
   autoDetected: null,
   autoActive: false,
   focus: null,
-  view: 'resets',
+  view: 'overview',
+  overview: null,
+  overviewError: null,
+  overviewFetching: false,
+  priceEditor: false,
   // What the bell badge reflects besides alerts: a waiting update and the
   // engine's own status.
   update: null,
@@ -182,6 +187,17 @@ function duration(seconds) {
   if (days) return `${days}d ${hours}h`;
   if (hours) return `${hours}h ${minutes}m`;
   return `${Math.max(1, minutes)}m`;
+}
+
+/** Remaining time as a single zero-padded clock value, e.g. "01h:28m". */
+function countdown(seconds) {
+  if (!known(seconds) || seconds < 0) return '—';
+  const s = Math.floor(seconds);
+  const days = Math.floor(s / 86400);
+  const hours = Math.floor((s % 86400) / 3600);
+  const minutes = Math.floor((s % 3600) / 60);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${days ? `${days}d ` : ''}${pad(hours)}h:${pad(minutes)}m`;
 }
 
 // ── pace ──────────────────────────────────────────────────────────────────
@@ -1078,12 +1094,12 @@ async function startProviderLink(id) {
   paintStatus();
 }
 
-function connectionControls(id, label, connected) {
+function connectionControls(id, label, connected, needsSignIn = !connected) {
   const link = state.links[id] || {};
   const busy = link.status === 'connecting';
   const host = el('div',{class:'provider-connection'});
   const actions = el('div',{class:'row-actions'});
-  if (!connected || link.status === 'error' || busy) {
+  if (needsSignIn || link.status === 'error' || busy) {
     actions.append(el('button',{
       class:'chip chip-primary',type:'button',disabled:busy,
       text:busy ? 'Waiting for sign-in…' : `Reconnect ${label}`,
@@ -1107,7 +1123,9 @@ function connectionControls(id, label, connected) {
   host.append(actions);
   const message = busy ? 'Finish signing in on the provider’s page. Usage will reconnect automatically.' :
     link.status==='error' ? link.message : link.status==='success' && !connected ? 'Sign-in completed. Waiting for verified usage data.' :
-    connected ? 'Connected through your existing sign-in.' : 'Sign in once in your browser. The app will detect the connection.';
+    connected ? 'Connected through your existing sign-in.' :
+    needsSignIn ? 'Sign in once in your browser. The app will detect the connection.' :
+    'Your sign-in is fine. This clears on its own; no reconnect needed.';
   host.append(el('p',{class:'tile-note gap-above',text:message,role:'status'}));
   return host;
 }
@@ -1229,9 +1247,7 @@ function projectionChart(p, openedAt, resetAt, { legend = true } = {}) {
   if (proj.runsOut) {
     const out = proj.outAt * 100;
     plot.prepend(el('div', { class: 'proj-lock', vars: { '--out': out } }));
-    // With the headline gone, the label carries when it runs dry and for how long.
-    const text = p.status === 'exhausted' ? `out of quota for ${duration(p.remaining)}`
-      : `dry ${momentText(Date.now() / 1000 + p.runsOutIn, p.total)} · out ${duration(p.early)}`;
+    const text = p.status === 'exhausted' ? 'limit reached' : `limit in ${countdown(p.runsOutIn)}`;
     plot.append(el('span', { class: `proj-lock-label${100 - out < 45 ? ' is-edge' : ''}`, vars: { '--out': out }, text }));
     if (p.status !== 'exhausted') plot.append(el('i', { class: 'proj-dot is-out', vars: { '--x': out, '--y': 0 } }));
   } else if (known(proj.end)) {
@@ -1251,7 +1267,7 @@ function projectionChart(p, openedAt, resetAt, { legend = true } = {}) {
     plot,
     el('div', { class: 'proj-axis' }, [
       el('span', { text: openedText(openedAt, p.total) }),
-      el('span', { text: `reset ${momentText(resetAt, p.total)}` }),
+      el('span', { class: 'proj-reset' }, ['reset in ', el('b', { text: countdown(p.remaining) }), ` · ${momentText(resetAt, p.total)}`]),
     ]),
     legend && el('div', { class: 'proj-legend' }, key.map(([cls, text]) => el('span', {}, [el('i', { class: `sw ${cls}` }), text]))),
   ]);
@@ -1279,8 +1295,28 @@ function settleChartLabels() {
   }
 }
 
+/** Full 5-hour sessions left in a weekly window, once its cost is measured. */
+function sessionsLabel(provider, week) {
+  const pair = (provider?.budget || []).find((b) => b.weekly === week.id);
+  if (!pair || pair.status === 'unrelated' || !windowCurrent(week) || !known(week.used_percent)) return null;
+  if (pair.status !== 'measured' || !(pair.share > 0)) {
+    const done = Math.min(99, Math.round((100 * (pair.session_points || 0)) / (pair.needed_session_points || 25)));
+    return withTooltip(el('span', { class: 'proj-sessions is-measuring', tabindex: 0, text: `Sessions: measuring ${done}%` }), () => [
+      el('b', { text: 'Sessions left, being measured' }),
+      el('div', { class: 'muted', text: 'The app learns how much of this week one 5-hour session uses by watching both limits move. It needs a bit more usage first.' }),
+    ]);
+  }
+  const session = provider.windows.find((w) => w.id === pair.session);
+  const f = budgetFigures(pair, session, week);
+  const left = f.sessionsLeft < 10 ? f.sessionsLeft.toFixed(1) : String(Math.round(f.sessionsLeft));
+  return withTooltip(el('span', { class: 'proj-sessions', tabindex: 0 }, [el('b', { text: `${pair.scoped ? '~' : ''}${left}` }), ` session${left === '1.0' ? '' : 's'} left`]), () => [
+    el('b', { text: `About ${Math.round(f.perWeek)} full 5-hour sessions a week` }),
+    el('div', { class: 'muted', text: `One full 5-hour session uses about ${pct(f.perSession, f.perSession < 10 ? 1 : 0)} of this week${pair.scoped ? ', at your usual mix of models' : ''}. Measured from your own readings.` }),
+  ]);
+}
+
 /** One window: its name, reset and verdict, then the projection. */
-function windowCard({ key, name, used, p, openedAt, resetAt }) {
+function windowCard({ key, name, used, p, openedAt, resetAt, sessions }) {
   const card = el('article', { class: 'wc is-chart', 'data-key': key }, [
     el('div', { class: 'wc-head' }, [
       el('div', { class: 'wc-title' }, [el('span', { class: 'wc-name', text: name })]),
@@ -1289,6 +1325,7 @@ function windowCard({ key, name, used, p, openedAt, resetAt }) {
   ]);
   card.append(p ? projectionChart(p, openedAt, resetAt, { legend: false })
     : el('div', { class: 'wc-empty', text: known(used) ? `${reading(used)}% used · ${resetText(resetAt).toLowerCase()}` : 'Awaiting update' }));
+  if (sessions) card.querySelector('.proj-plot')?.append(sessions);
   return card;
 }
 
@@ -1313,24 +1350,8 @@ function budgetFigures(pair, session, week) {
   };
 }
 
-/** How many full 5-hour sessions the rest of the week holds, as one chip. */
-function budgetChip(provider) {
-  const pair = (provider.budget || []).find(b => b.status === 'measured' && b.share > 0);
-  if (!pair) return null;
-  const session = provider.windows.find(w => w.id === pair.session);
-  const week = provider.windows.find(w => w.id === pair.weekly);
-  if (!week || !windowCurrent(week) || !known(week.used_percent)) return null;
-  const f = budgetFigures(pair, session, week);
-  const left = f.sessionsLeft < 10 ? f.sessionsLeft.toFixed(1) : String(Math.round(f.sessionsLeft));
-  return withTooltip(el('span', { class: 'prov-flag is-budget', tabindex: 0, text: `${left} of ~${Math.round(f.perWeek)} sessions left` }), () => [
-    el('b', { text: 'Your week in 5-hour sessions' }),
-    el('div', { class: 'muted', text: `One full 5-hour session uses about ${pct(f.perSession, f.perSession < 10 ? 1 : 0)} of the week, measured from your own readings.` }),
-  ]);
-}
-
-function providerSection({ id, label, live, meta, warning, onRefresh, cards, note, badge }) {
+function providerSection({ id, label, live, meta, warning, onRefresh, cards, note }) {
   const actions = el('div', { class: 'prov-actions' }, [
-    badge,
     warning && withTooltip(el('span', { class: 'prov-flag', tabindex: 0, text: 'Cached reading' }), () => [el('div', { text: warning })]),
     el('button', { class: 'icon-btn prov-refresh', type: 'button', title: 'Refresh usage', 'aria-label': `Refresh ${label} usage`, onclick: onRefresh }, [icon(ICONS.refresh, 16)]),
   ]);
@@ -1373,6 +1394,8 @@ function renderResets() {
   const focused = document.activeElement?.closest?.('#resetCards [data-key]')?.dataset.key;
   host.replaceChildren();
   $('resetsNow').textContent = `Updated ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`;
+  const cursor = cursorSection();
+  if (cursor) host.append(cursor);
   for (const [id, label] of [['claude', 'Claude'], ['codex', 'Codex']]) {
     const provider = state.providers?.providers?.find(p => p.id === id);
     const current = providerCurrent(provider);
@@ -1388,6 +1411,7 @@ function renderResets() {
         openedAt: known(span) && known(window.resets_at) ? window.resets_at - span : null,
         resetAt: window.resets_at,
         span,
+        sessions: live ? sessionsLabel(provider, window) : null,
       });
     }) : [];
     let note = null;
@@ -1395,7 +1419,7 @@ function renderResets() {
       const reason = cards.length ? null : state.providersError || provider?.reason || (provider ? 'No current provider snapshot available.' : 'Waiting for provider data.');
       note = el('div', { class: 'wc is-note' }, [
         reason && el('div', { class: 'connection-reason', text: reason.replace('Open Claude Code to reconnect.', `Use Reconnect ${label} below.`) }),
-        connectionControls(id, label, current),
+        connectionControls(id, label, current, !provider || Boolean(provider.needs_sign_in)),
       ]);
     }
     host.append(providerSection({
@@ -1404,13 +1428,353 @@ function renderResets() {
       warning: current && provider.warning ? `${provider.warning} Showing the reading from ${relativeTime(provider.fetched_at)}.` : null,
       onRefresh: () => refreshProviders(true),
       cards, note,
-      badge: current ? budgetChip(provider) : null,
     }));
   }
-  const cursor = cursorSection();
-  if (cursor) host.append(cursor);
   settleChartLabels();
   if (focused) host.querySelector(`[data-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+}
+
+// ── overview ──────────────────────────────────────────────────────────────
+// The whole cycle at a glance: what the usage is worth at API prices against
+// what the plans cost, and how much agent work your own hours drove.
+
+const CURSOR_PLAN_PRICE = { ultra: 200, 'pro+': 60, pro: 20, business: 40, teams: 40 };
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const OV_HUE = { you: 'var(--ov-you)', cursor: 'var(--ov-cursor)', claude: 'var(--ov-claude)', codex: 'var(--ov-codex)' };
+
+const dollars = (cents) => `$${Math.round(cents / 100).toLocaleString('en-US')}`;
+/** Days and hours past a day, hours and minutes under it: "6 days 22 h", "14 h 18 min". */
+function spanParts(hours) {
+  const minutes = Math.round(Math.max(0, hours) * 60);
+  const d = Math.floor(minutes / 1440);
+  const h = Math.floor((minutes % 1440) / 60);
+  const m = minutes % 60;
+  if (d) return [[d, d === 1 ? 'day' : 'days'], [h, 'h']];
+  if (h) return [[h, 'h'], [m, 'min']];
+  return [[m, 'min']];
+}
+const spanText = (hours) => spanParts(hours).filter(([n], i, all) => n || all.length === 1 || i === 0).map(([n, u]) => `${n} ${u}`).join(' ');
+const spanBig = (hours) => spanParts(hours).filter(([n], i, all) => n || all.length === 1 || i === 0)
+  .flatMap(([n, u], i) => [i ? ` ${n}` : String(n), el('small', { text: ` ${u}` })]);
+const hoursShort = (h) => (h >= 1 ? `${Math.round(h)}h` : `${Math.round(h * 60)}m`);
+const tokenSum = (t) => ['input', 'output', 'cache_read', 'cache_write'].reduce((s, k) => s + (t?.[k] || 0), 0);
+
+function overviewSince() {
+  const start = state.cycle?.cycle_start ? Date.parse(state.cycle.cycle_start) / 1000 : null;
+  return known(start) ? start : Math.floor(Date.now() / 1000 - 30 * 86400);
+}
+
+async function refreshOverview() {
+  if (state.overviewFetching) return;
+  state.overviewFetching = true;
+  try {
+    state.overview = await window.hud.call('overview', { since: overviewSince() });
+    state.overviewError = null;
+  } catch (err) {
+    state.overviewError = engineMessage(err);
+  } finally {
+    state.overviewFetching = false;
+    renderOverview();
+  }
+}
+
+/** Value and tokens per provider this cycle, Cursor from its dashboard and
+    Claude and Codex from their local logs. */
+function overviewProviders(o) {
+  const rows = [];
+  const cycle = state.cycle;
+  if (cycle && known(cycle.total_spend_cents)) {
+    rows.push({
+      id: 'cursor', label: 'Cursor', cents: cycle.total_spend_cents,
+      tokens: { input: cycle.agg_input, output: cycle.agg_output, cache_read: cycle.agg_cache_read, cache_write: cycle.agg_cache_write },
+      price: CURSOR_PLAN_PRICE[String(cycle.plan || '').toLowerCase()] ?? null,
+    });
+  }
+  for (const [id, label] of [['claude', 'Claude'], ['codex', 'Codex']]) {
+    const p = o.providers?.[id];
+    if (!p) continue;
+    rows.push({ id, label, cents: p.cents || 0, tokens: p.tokens || {}, price: o.plan_prices?.[id] ?? null });
+  }
+  return rows;
+}
+
+function overviewHero(o, rows) {
+  const total = rows.reduce((s, r) => s + r.cents, 0);
+  const tokens = rows.reduce((s, r) => s + tokenSum(r.tokens), 0);
+  const paid = rows.reduce((s, r) => s + (known(r.price) ? r.price : 0), 0);
+  const roundCents = Math.round(total);
+  const whole = Math.floor(roundCents / 100);
+  const cycle = state.cycle;
+  const start = o.since;
+  const end = cycle?.cycle_end ? Date.parse(cycle.cycle_end) / 1000 : null;
+  const dateText = (epoch) => new Date(epoch * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
+
+  const split = el('div', { class: 'ov-split' }, rows.map((r) => el('div', { class: 'ov-pc', vars: { '--c': PROVIDER_HUE[r.id], '--pcol': OV_HUE[r.id] } }, [
+    el('div', { class: 'ov-pc-h' }, [el('span', { class: 'ov-mk' }, [icon(PROVIDER_GLYPH[r.id], 12)]), r.label]),
+    el('div', { class: 'ov-pc-v', text: dollars(r.cents) }),
+    el('div', { class: 'ov-pc-t' }, [el('b', { text: compact(tokenSum(r.tokens)) }), ' tokens',
+      known(r.price) && r.price > 0 ? ` · ${(r.cents / 100 / r.price).toFixed(1)}×` : null]),
+    el('div', { class: 'ov-bar' }, [el('i', { vars: { '--w': `${total ? (r.cents / total) * 100 : 0}%` } })]),
+  ])));
+
+  let progress = null;
+  if (known(end) && end > start) {
+    const now = Date.now() / 1000;
+    const frac = Math.min(1, Math.max(0, (now - start) / (end - start)));
+    const day = Math.max(1, Math.ceil((now - start) / 86400));
+    const days = Math.round((end - start) / 86400);
+    progress = el('div', { class: 'ov-cycle' }, [
+      el('span', {}, ['Day ', el('b', { text: String(Math.min(day, days)) }), ` of ${days}`]),
+      el('div', { class: 'ov-track' }, [el('i', { vars: { '--w': `${frac * 100}%` } })]),
+      frac > 0.05 && frac < 1 ? el('span', {}, ['On track for ', el('b', { class: 'ov-hi', text: dollars(total / frac) })]) : null,
+    ]);
+  }
+
+  return el('div', { class: 'card ov-hero' }, [
+    el('div', { class: 'ov-eyebrow', text: known(end) ? `This cycle · ${dateText(start)} – ${dateText(end)}` : `Since ${dateText(start)}` }),
+    el('div', { class: 'ov-hero-row' }, [
+      el('div', {}, [
+        el('div', { class: 'ov-big' }, [`$${whole.toLocaleString('en-US')}`, el('small', { text: `.${String(roundCents % 100).padStart(2, '0')}` })]),
+        el('div', { class: 'ov-lede' }, ['of AI at API prices, across ', el('b', { text: `${compact(tokens)} tokens` })]),
+      ]),
+      el('button', { class: 'ov-roi', type: 'button', title: 'Edit plan prices', onclick: () => { state.priceEditor = !state.priceEditor; renderOverview(); } }, [
+        el('div', { class: 'ov-x', text: paid > 0 ? `${(total / 100 / paid).toFixed(1)}×` : '—' }),
+        el('div', { class: 'ov-l' }, ['for ', el('b', { text: `$${paid.toLocaleString('en-US')}/mo` }), ' in subscriptions']),
+      ]),
+    ]),
+    state.priceEditor ? priceEditor(o) : null,
+    split,
+    progress,
+  ]);
+}
+
+function priceEditor(o) {
+  const field = (id, label) => el('label', { class: 'ov-price' }, [label, el('span', { class: 'ov-price-in' }, [
+    '$', el('input', { type: 'number', min: 0, step: 1, id: `price-${id}`, value: String(o.plan_prices?.[id] ?? '') }), '/mo',
+  ])]);
+  const save = async () => {
+    const prices = {};
+    for (const id of ['claude', 'codex']) {
+      const value = Number($(`price-${id}`).value);
+      if (Number.isFinite(value) && value >= 0) prices[id] = value;
+    }
+    try {
+      state.overview.plan_prices = await window.hud.call('set_plan_prices', { prices });
+    } catch (err) {
+      banner(engineMessage(err));
+    }
+    state.priceEditor = false;
+    renderOverview();
+  };
+  return el('div', { class: 'ov-prices' }, [
+    el('span', { class: 'ov-prices-note', text: `Cursor ${state.cycle?.plan || ''} is read from your account.` }),
+    field('claude', 'Claude'), field('codex', 'Codex / ChatGPT'),
+    el('button', { class: 'chip chip-primary', type: 'button', text: 'Save', onclick: save }),
+  ]);
+}
+
+function overviewTime(o) {
+  const claude = o.providers?.claude?.agent_hours || 0;
+  const codex = o.providers?.codex?.agent_hours || 0;
+  const cursor = o.cursor_agent_hours || 0;
+  const agent = claude + codex + cursor;
+  const human = o.human_hours || 0;
+  const most = Math.max(human, claude, codex, cursor, 0.01);
+  const lane = (label, h, color) => el('div', { class: 'ov-lane' }, [
+    el('div', { class: 'ov-lt' }, [el('span', { text: label }), el('b', { text: spanText(h) })]),
+    el('div', { class: 'ov-lb' }, [el('i', { vars: { '--w': `${(h / most) * 100}%`, '--c': color } })]),
+  ]);
+  const peak = o.peak?.agents || 0;
+  const peakAt = o.peak?.at ? new Date(o.peak.at * 1000).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+  const parallel = o.wall_hours > 0 ? agent / o.wall_hours : null;
+  return el('div', { class: 'card ov-time' }, [
+    el('div', {}, [
+      el('div', { class: 'ov-eyebrow', text: 'Your time vs agent time' }),
+      el('div', { class: 'ov-vs' }, [
+        el('div', {}, [el('div', { class: 'ov-hours is-you' }, spanBig(human)),
+          el('div', { class: 'ov-cap', text: `you, in ${o.sittings} sitting${o.sittings === 1 ? '' : 's'}` })]),
+        el('div', { class: 'ov-arrow', text: '→' }),
+        el('div', {}, [el('div', { class: 'ov-hours' }, spanBig(agent)),
+          el('div', { class: 'ov-cap', text: 'agents working' })]),
+      ]),
+      human > 0 ? el('div', { class: 'ov-lev' }, [el('b', { text: `${(agent / human).toFixed(1)}×` }),
+        `every hour of yours drove ${(agent / human).toFixed(1)} hours of agent work`]) : null,
+      el('p', { class: 'ov-note' }, [
+        `Agents ran for ${spanText(agent)} inside `, el('b', { text: spanText(o.wall_hours) }), ' of real time',
+        known(parallel) ? [', so ', el('b', { text: parallel.toFixed(1) }), ' were running at once on average'] : null,
+        '. ', el('b', { text: spanText(o.think_hours) }), ' of your time went on reading replies and deciding what to ask next.',
+      ].flat()),
+    ]),
+    el('div', { class: 'ov-lanes' }, [
+      lane('You', human, OV_HUE.you),
+      o.cursor_agent_hours != null ? lane('Cursor', cursor, OV_HUE.cursor) : null,
+      lane('Claude Code', claude, OV_HUE.claude),
+      lane('Codex', codex, OV_HUE.codex),
+      peak > 0 ? el('div', { class: 'ov-peak' }, [
+        el('div', { class: 'ov-peak-n', text: String(peak) }),
+        el('div', { class: 'ov-peak-d' }, [el('b', { text: `agent${peak === 1 ? '' : 's'} at once` }), `peak · ${peakAt}`]),
+        el('div', { class: 'ov-dots' }, Array.from({ length: Math.min(peak, 40) }, () => el('i'))),
+      ]) : null,
+    ]),
+  ]);
+}
+
+/** Your time at the computer, one bar per day of the cycle. */
+function overviewDesk(o) {
+  const days = o.desk_days || [];
+  if (!days.length) return null;
+  const total = days.reduce((s, d) => s + d.hours, 0);
+  // Averaged over the days you showed up; days with no prompts say nothing about a day's work.
+  const active = days.filter((d) => d.hours > 0).length;
+  const avg = active ? total / active : 0;
+  const best = days.reduce((a, d) => (d.hours > (a?.hours || 0) ? d : a), null);
+  const long = days.filter((d) => d.hours >= 12).length;
+  let streak = 0;
+  for (let i = days.length - 1; i >= 0; i--) {
+    if (days[i].hours >= 1) streak++;
+    else if (i < days.length - 1) break;
+  }
+  const scale = Math.max(8, Math.ceil(Math.max(...days.map((d) => d.hours)) / 4) * 4);
+  const dayName = (date, opts) => new Date(`${date}T12:00`).toLocaleDateString([], opts);
+  const step = days.length > 21 ? 7 : days.length > 10 ? 3 : 1;
+  const y = (h) => `${(h / scale) * 100}%`;
+  const plot = el('div', { class: 'ov-desk-plot' }, [
+    el('div', { class: 'ov-desk-ref', vars: { '--y': y(8) } }, [Math.abs(avg - 8) > scale * 0.12 ? el('span', { text: '8 h' }) : null]),
+    el('div', { class: 'ov-desk-avg', vars: { '--y': y(avg) } }, [el('span', { text: `avg ${spanText(avg)}` })]),
+    ...days.map((d) => el('div', { class: 'ov-dcol', title: `${dayName(d.date, { weekday: 'short', month: 'short', day: 'numeric' })} · ${spanText(d.hours)}` }, [
+      el('div', { class: `ov-dbar${d === best ? ' is-best' : ''}`, vars: { '--h': y(d.hours), '--o': (0.35 + 0.65 * Math.min(1, d.hours / 14)).toFixed(2) } }, [
+        d.hours >= 0.75 && days.length <= 24 ? el('span', { class: 'ov-dval', text: hoursShort(d.hours) }) : null,
+      ]),
+    ])),
+  ]);
+  const axis = el('div', { class: 'ov-desk-x' }, days.map((d, i) => el('span', {
+    class: i === days.length - 1 ? 'is-today' : null,
+    text: i === days.length - 1 ? 'Today' : i % step === 0 && days.length - 1 - i >= 2 ? dayName(d.date, { month: 'short', day: 'numeric' }) : '',
+  })));
+  const stat = (label, value, color) => el('div', { class: `ov-dstat${color ? ' is-hi' : ''}`, vars: color ? { '--c': color } : {} }, [
+    el('span', {}, [el('i'), label]), el('b', { text: value }),
+  ]);
+  return el('div', { class: 'card ov-chart' }, [
+    el('div', { class: 'ov-head' }, [
+      el('h2', { text: 'Your time at the computer' }),
+      el('span', { class: 'ov-muted' }, [el('b', { text: spanText(total) }), ` on ${active} of ${days.length} day${days.length === 1 ? '' : 's'}`]),
+    ]),
+    el('div', { class: 'ov-desk-stats' }, [
+      stat('Average active day', spanText(avg)),
+      best ? stat(`Longest · ${dayName(best.date, { weekday: 'short', month: 'short', day: 'numeric' })}`, spanText(best.hours), OV_HUE.you) : null,
+      stat('Days over 12 h', String(long)),
+      stat('Streak', `${streak} day${streak === 1 ? '' : 's'}`),
+    ]),
+    plot,
+    axis,
+  ]);
+}
+
+function overviewTiles(o) {
+  const agents = ['claude', 'codex'].reduce((s, id) => s + (o.providers?.[id]?.sessions || 0) + (o.providers?.[id]?.subagents || 0), 0);
+  const sessions = ['claude', 'codex'].reduce((s, id) => s + (o.providers?.[id]?.sessions || 0), 0);
+  const agentHours = (o.providers?.claude?.agent_hours || 0) + (o.providers?.codex?.agent_hours || 0);
+  const tile = (label, value, note) => el('div', { class: 'card ov-tile' }, [
+    el('div', { class: 'ov-eyebrow', text: label }), el('div', { class: 'ov-tv', text: value }), el('div', { class: 'ov-tn' }, note),
+  ]);
+  const cycle = state.cycle;
+  return el('div', { class: 'ov-tiles' }, [
+    tile('Agents', String(agents), [el('b', { text: String(sessions) }), ' sessions · ', el('b', { text: String(agents - sessions) }), ' sub']),
+    tile('Tool calls', compact(o.tool_calls), agentHours > 0 ? [el('b', { text: `~${Math.round(o.tool_calls / agentHours)}` }), ' per agent-hour'] : []),
+    tile('Your prompts', String(o.prompts), o.prompts ? [el('b', { text: `~${Math.round(o.tool_calls / o.prompts)}` }), ' tool calls each'] : []),
+    cycle?.conversations ? tile('Cursor chats', String(cycle.conversations.length), known(cycle.headless?.n) ? [el('b', { text: compact(cycle.headless.n) }), ' background runs'] : [])
+      : tile('Sittings', String(o.sittings), o.longest_sitting ? ['longest ', el('b', { text: spanText(o.longest_sitting.hours) })] : []),
+  ]);
+}
+
+function overviewDays(o) {
+  const days = o.days || [];
+  const lanes = [['codex', 'Codex', OV_HUE.codex], ['claude', 'Claude', OV_HUE.claude], ['cursor', 'Cursor', OV_HUE.cursor]]
+    .filter(([id]) => days.some((d) => (d[id] || 0) >= 0.02));
+  const sumDay = (d) => lanes.reduce((s, [id]) => s + (d[id] || 0), 0);
+  const top = Math.max(1, ...days.map(sumDay));
+  const scale = Math.ceil(top / 4) * 4;
+  const cols = days.map((d, i) => {
+    const total = sumDay(d);
+    return el('div', { class: 'ov-col' }, [
+      total >= 0.05 ? el('span', { class: 'ov-col-v', text: hoursShort(total) }) : null,
+      el('div', { class: 'ov-col-bar', vars: { '--h': `${(total / scale) * 100}%` } },
+        lanes.map(([id, , c]) => ((d[id] || 0) >= 0.02 ? el('i', { vars: { '--f': d[id] / total, '--c': c } }) : null))),
+      el('span', { class: `ov-col-x${i === days.length - 1 ? ' is-today' : ''}`,
+        text: i === days.length - 1 ? 'Today' : WEEKDAYS[(new Date(`${d.date}T12:00`).getDay() + 6) % 7] }),
+    ]);
+  });
+  return el('div', { class: 'card ov-chart' }, [
+    el('div', { class: 'ov-head' }, [el('h2', { text: 'Agent hours per day' }), el('div', { class: 'ov-legend' },
+      [...lanes].reverse().map(([, label, c]) => el('span', {}, [el('i', { class: 'ov-sw', vars: { '--c': c } }), label])))]),
+    el('div', { class: 'ov-bars' }, cols),
+  ]);
+}
+
+function overviewHeat(o) {
+  const heat = o.heat || [];
+  const top = Math.max(1, ...heat.flat());
+  const grid = el('div', { class: 'ov-heat' });
+  heat.forEach((row, d) => {
+    grid.append(el('span', { class: 'ov-heat-d', text: WEEKDAYS[d] }));
+    row.forEach((minutes, hour) => grid.append(el('i', {
+      class: minutes > 0 ? 'is-on' : null,
+      vars: minutes > 0 ? { '--a': (0.2 + Math.sqrt(minutes / top) * 0.8).toFixed(2) } : {},
+      title: `${WEEKDAYS[d]} ${hour}:00 · ${Math.round(minutes)} agent-min`,
+    })));
+  });
+  return el('div', { class: 'card ov-chart' }, [
+    el('div', { class: 'ov-head' }, [el('h2', { text: 'When agents run' }), el('span', { class: 'ov-muted', text: 'agent-minutes by hour' })]),
+    grid,
+    el('div', { class: 'ov-heat-x' }, ['', '12a', '6a', '12p', '6p'].map((t) => el('span', { text: t }))),
+  ]);
+}
+
+function overviewTools(o) {
+  const tools = (o.tools || []).filter(([name]) => name !== 'Other').slice(0, 7);
+  const top = Math.max(1, ...tools.map(([, n]) => n));
+  return el('div', { class: 'card ov-chart' }, [
+    el('div', { class: 'ov-head' }, [el('h2', { text: 'What agents did' }), el('span', { class: 'ov-muted', text: `${o.tool_calls.toLocaleString('en-US')} tool calls` })]),
+    ...tools.map(([name, n]) => el('div', { class: 'ov-trow' }, [
+      el('span', { class: 'ov-tname', text: name }),
+      el('span', { class: 'ov-tbar' }, [el('i', { vars: { '--w': `${(n / top) * 100}%` } })]),
+      el('span', { class: 'ov-tc', text: n >= 1000 ? compact(n).toUpperCase() : String(n) }),
+    ])),
+  ]);
+}
+
+function overviewMix(rows) {
+  const sum = (key) => rows.reduce((s, r) => s + (r.tokens?.[key] || 0), 0);
+  const parts = [['cache_read', 'Cache read', 'var(--ov-a3)'], ['input', 'Input', 'var(--accent)'],
+    ['cache_write', 'Cache write', 'var(--ov-a2)'], ['output', 'Output', 'var(--ink)']].map(([key, label, c]) => ({ label, c, n: sum(key) }));
+  const total = parts.reduce((s, p) => s + p.n, 0) || 1;
+  const output = parts[3].n;
+  return el('div', { class: 'card ov-chart' }, [
+    el('div', { class: 'ov-head' }, [el('h2', { text: 'Token mix' }), el('span', { class: 'ov-muted', text: `${compact(total)} total` })]),
+    el('div', { class: 'ov-mix' }, parts.map((p) => el('i', { vars: { '--w': `${Math.max(0.4, (p.n / total) * 100)}%`, '--c': p.c } }))),
+    el('div', { class: 'ov-mixl' }, parts.map((p) => el('span', {}, [el('i', { class: 'ov-sw', vars: { '--c': p.c } }), p.label, el('b', { text: compact(p.n) })]))),
+    output > 0 ? el('div', { class: 'ov-muted ov-gap' }, ['Agents wrote ', el('b', { text: compact(output) }),
+      ` tokens of output, about ${Math.round((output * 0.75) / 500).toLocaleString('en-US')} pages of text.`]) : null,
+  ]);
+}
+
+function renderOverview() {
+  const host = $('overviewBody');
+  const o = state.overview;
+  if (!o) {
+    host.replaceChildren(el('div', { class: 'ov-loading', text: state.overviewError || 'Reading your agent logs…' }));
+    return;
+  }
+  const rows = overviewProviders(o);
+  host.replaceChildren(el('div', { class: 'ov' }, [
+    overviewHero(o, rows),
+    overviewTime(o),
+    overviewDesk(o),
+    overviewTiles(o),
+    el('div', { class: 'ov-two' }, [overviewDays(o), overviewHeat(o)]),
+    el('div', { class: 'ov-two' }, [overviewTools(o), overviewMix(rows)]),
+    el('div', { class: 'ov-foot', text: 'Values are API-price equivalents: Cursor from its dashboard, Claude Code and Codex estimated from local logs. Your time is counted from your Claude and Codex prompts and Cursor\'s foreground agent requests.' }),
+  ]));
 }
 
 // ── chrome ────────────────────────────────────────────────────────────────
@@ -1493,6 +1857,8 @@ async function refreshCycle(force = false) {
     paintStatus();
     renderResets();
     renderChat();
+    if (state.overview && state.overview.since !== overviewSince()) refreshOverview();
+    else renderOverview();
   }
 }
 
@@ -1583,9 +1949,33 @@ function showResetAlert(alert) {
   const dialog = $('resetAlert');
   if (!dialog) return;
   if (!alert) { if (dialog.open) dialog.close(); return; }
-  $('resetAlertTitle').textContent = alert.events.some(e => e.phase === 'preview') ? 'Alert preview' :
-    alert.events.some(e => e.phase === 'reset') ? 'Usage has reset' : 'Reset approaching';
-  $('resetAlertMessages').replaceChildren(...alert.events.map(e => el('p', {text:e.message})));
+  const events = alert.events;
+  const preview = events.some(e => e.phase === 'preview');
+  const resets = events.filter(e => e.phase === 'reset');
+  const soon = events.filter(e => e.phase === 'prewarn');
+  const minutesLeft = (e) => known(e.resets_at) ? Math.max(1, Math.ceil((e.resets_at - Date.now() / 1000) / 60)) : null;
+  const name = (e) => e.label || `${e.provider_label || ''} ${e.window_label || ''}`.trim();
+  let title;
+  if (preview) title = 'Alert preview';
+  else if (events.length === 1 && resets.length) title = `${name(resets[0])} has reset`;
+  else if (events.length === 1 && soon.length) title = `${name(soon[0])} resets in ${minutesLeft(soon[0]) ?? '—'} min`;
+  else title = resets.length ? `${events.length} limits changed` : `${events.length} limits reset soon`;
+  $('resetAlertTitle').textContent = title;
+  $('resetAlertKicker').textContent = resets.length && !soon.length ? 'Fresh quota available' : 'Usage limits';
+  $('resetAlertIcon').replaceChildren(icon(resets.length && !soon.length ? ICONS.check : ICONS.clock, 20));
+  $('resetAlertMessages').replaceChildren(...events.map((e) => {
+    if (e.phase === 'preview') return el('div', { class: 'ra-row' }, [el('div', { class: 'ra-what' }, [el('b', { text: 'Preview' }), el('span', { text: e.message.replace(/^PREVIEW:\s*/, '') })])]);
+    const left = minutesLeft(e);
+    const at = known(e.resets_at) ? new Date(e.resets_at * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : null;
+    const detail = [e.phase === 'reset' ? 'New window started' : at && `Resets at ${at}`,
+      known(e.used_percent) && e.phase !== 'reset' ? `${reading(e.used_percent)}% used` : null].filter(Boolean).join(' · ');
+    return el('div', { class: 'ra-row', vars: { '--c': PROVIDER_HUE[e.provider] || 'var(--accent)' } }, [
+      PROVIDER_GLYPH[e.provider] ? el('span', { class: 'ra-mark' }, [icon(PROVIDER_GLYPH[e.provider], 15)]) : null,
+      el('div', { class: 'ra-what' }, [el('b', { text: name(e) || e.message }), el('span', { text: detail || e.message })]),
+      el('div', { class: 'ra-when' }, e.phase === 'reset' ? [el('b', { text: 'Reset' }), el('span', { text: 'now' })]
+        : [el('b', { text: left ? `${left} min` : '—' }), el('span', { text: 'left' })]),
+    ]);
+  }));
   dialog.classList.toggle('is-pulsing', alert.pulsing);
   if (!dialog.open) { dialog.showModal(); $('btnDismissAlert').focus(); }
 }
@@ -1673,6 +2063,7 @@ async function boot() {
   renderChat();
   $('btnTestBuzz').addEventListener('click', () => window.hud.previewResetAlert());
   $('btnDismissAlert').addEventListener('click', () => window.hud.dismissResetAlert());
+  $('btnAlertLimits').addEventListener('click', () => { window.hud.dismissResetAlert(); selectView('resets'); });
   $('resetAlert').addEventListener('cancel', event => { event.preventDefault(); window.hud.dismissResetAlert(); });
   let alertSettings = await window.hud.call('alert_settings');
   const paintAlertToggle = () => { $('btnOpenConfig').textContent = alertSettings.buzz_enabled ? 'Pause alerts' : 'Enable alerts'; };
@@ -1725,6 +2116,7 @@ async function boot() {
     /* no cache yet */
   }
 
+  refreshOverview();
   await refreshLocal();
   refreshProviders(false);
   paintStatus();
@@ -1734,6 +2126,7 @@ async function boot() {
   setInterval(() => refreshProviders(false), POLL.providers);
   setInterval(refreshLocal, POLL.local);
   setInterval(() => refreshCycle(false), POLL.cycle);
+  setInterval(refreshOverview, POLL.overview);
   if (openSmsSetup) { selectView('resets'); $('btnSms').click(); }
   else if (openSessions) selectView('chat');
 }

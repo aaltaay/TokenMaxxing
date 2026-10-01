@@ -54,7 +54,8 @@
 
   <nav class="segmented" role="tablist" aria-label="Views">
     <span class="segmented-thumb" id="segThumb" aria-hidden="true"></span>
-    <button role="tab" id="tab-resets" aria-controls="view-resets" aria-selected="true">Limits & resets</button>
+    <button role="tab" id="tab-overview" aria-controls="view-overview" aria-selected="true">Overview</button>
+    <button role="tab" id="tab-resets" aria-controls="view-resets" aria-selected="false">Limits & resets</button>
     <button role="tab" id="tab-chat" aria-controls="view-chat" aria-selected="false">Sessions</button>
     <button role="tab" id="tab-guide" aria-controls="view-guide" aria-selected="false">Model guide</button>
   </nav>
@@ -75,6 +76,11 @@
   </div>
 
   <main class="views">
+
+    <!-- ── Overview ──────────────────────────────────────────────────── -->
+    <section class="view is-active" id="view-overview" role="tabpanel" aria-labelledby="tab-overview">
+      <div id="overviewBody"><div class="ov-loading">Reading your agent logs…</div></div>
+    </section>
 
     <!-- ── This chat ─────────────────────────────────────────────────── -->
     <section class="view" id="view-chat" role="tabpanel" aria-labelledby="tab-chat">
@@ -101,7 +107,7 @@
     </section>
 
     <!-- ── Resets ────────────────────────────────────────────────────── -->
-    <section class="view is-active" id="view-resets" role="tabpanel" aria-labelledby="tab-resets">
+    <section class="view" id="view-resets" role="tabpanel" aria-labelledby="tab-resets">
       <div class="resets-intro">
         <div class="resets-legend">
           <span><i class="sw sw-line"></i>Average so far</span>
@@ -496,10 +502,19 @@
 <div class="banner" id="banner" role="status" aria-live="polite"></div>
 <div class="tooltip" id="tooltip" role="tooltip"></div>
 <dialog id="resetAlert" class="reset-alert" aria-labelledby="resetAlertTitle">
-  <h1 id="resetAlertTitle">Reset alert</h1>
-  <div id="resetAlertMessages"></div>
-  <p>Sound and pulsing stop after one minute. This notice stays until dismissed.</p>
-  <button id="btnDismissAlert" class="chip chip-primary" autofocus>Dismiss alert</button>
+  <div class="ra-head">
+    <span class="ra-icon" id="resetAlertIcon" aria-hidden="true"></span>
+    <div>
+      <div class="ra-kicker" id="resetAlertKicker">Usage limits</div>
+      <h1 id="resetAlertTitle">Reset alert</h1>
+    </div>
+  </div>
+  <div class="ra-rows" id="resetAlertMessages"></div>
+  <div class="ra-foot">
+    <span class="ra-note">Sound stops after a minute · Esc to dismiss</span>
+    <button id="btnAlertLimits" class="chip" type="button">View limits</button>
+    <button id="btnDismissAlert" class="chip chip-primary" type="button" autofocus>Dismiss</button>
+  </div>
 </dialog>
 <dialog id="smsSettings" class="sms-settings" aria-labelledby="smsTitle">
   <h2 id="smsTitle">Connect Twilio SMS</h2>

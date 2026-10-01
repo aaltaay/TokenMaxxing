@@ -21,6 +21,7 @@ import traceback
 from datetime import datetime
 
 import cursor_usage as cu
+import overview_stats
 import reset_schedule as rs
 import provider_usage as pu
 import reset_alerts
@@ -133,8 +134,9 @@ def cmd_cycle(force: bool = False) -> dict:
 
 
 def cmd_cached_cycle() -> dict | None:
-    """Paint only a fresh snapshot validated against the current Cursor sign-in."""
-    report = cu.read_cached_cycle()
+    """Paint the last snapshot for the current Cursor sign-in, however old, so a
+    restart shows Cursor at once; the live fetch that follows replaces it."""
+    report = cu.read_cached_cycle(allow_stale=True)
     return _decorate_cycle(report) if report is not None else None
 
 
@@ -231,6 +233,31 @@ def cmd_alert_settings() -> dict:
             (("buzz_enabled", True), ("prewarn_enabled", True), ("prewarn_minutes", 15), ("sms_to", ""))}
 
 
+PLAN_PRICES = {"claude": 200, "codex": 20}
+
+
+def cmd_overview(since: float | None = None) -> dict:
+    """Cycle totals from local agent logs, plus the monthly plan prices."""
+    since = since if isinstance(since, (int, float)) and since > 0 else time.time() - 30 * 86400
+    cycle = cu.read_cached_cycle(allow_stale=True) or {}
+    stats = overview_stats.overview(since, cursor_minutes=cycle.get("activity_minutes"))
+    prices = rs.load_config().get("plan_prices") or {}
+    stats["plan_prices"] = {key: prices.get(key, default) for key, default in PLAN_PRICES.items()}
+    return stats
+
+
+def cmd_set_plan_prices(prices: dict) -> dict:
+    cfg = rs.load_config()
+    current = cfg.get("plan_prices") or {}
+    for key in PLAN_PRICES:
+        value = (prices or {}).get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 100000:
+            current[key] = value
+    cfg["plan_prices"] = current
+    rs.save_config(cfg)
+    return {key: current.get(key, default) for key, default in PLAN_PRICES.items()}
+
+
 def cmd_buzz() -> dict:
     return {"kind": rs.play_buzz()}
 
@@ -268,6 +295,8 @@ COMMANDS = {
     "cycle": cmd_cycle,
     "cached_cycle": cmd_cached_cycle,
     "resets": cmd_resets,
+    "overview": cmd_overview,
+    "set_plan_prices": cmd_set_plan_prices,
     "providers": cmd_providers,
     "due": cmd_due,
     "buzz": cmd_buzz,
