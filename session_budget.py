@@ -45,11 +45,20 @@ def _bucket(window_id):
     return text.split(':', 1)[0] if ':' in text else ''
 
 
+def _scoped(window_id):
+    return _bucket(window_id) == 'weekly_scoped'
+
+
 def pairs(windows):
-    """(5-hour, weekly) windows that count the same usage: same quota bucket."""
+    """(5-hour, weekly) windows that count the same usage: same quota bucket.
+    A model-scoped weekly cap pairs with the account's 5-hour window too; its
+    share then reflects your usual model mix, and a cap that never moves with
+    the session is reported as unrelated."""
     sessions = [w for w in windows if w.get('window_minutes') == SESSION_MINUTES]
     weeks = [w for w in windows if w.get('window_minutes') == WEEK_MINUTES]
-    return [(s, w) for s in sessions for w in weeks if _bucket(s.get('id')) == _bucket(w.get('id'))]
+    return [(s, w) for s in sessions for w in weeks
+            if _bucket(s.get('id')) == _bucket(w.get('id'))
+            or (_bucket(s.get('id')) == '' and _scoped(w.get('id')))]
 
 
 def observe(state, provider_id, windows, at):
@@ -99,6 +108,7 @@ def estimates(state, provider_id, windows):
         else:
             status = 'measuring'
         result.append({'session': session['id'], 'weekly': week['id'], 'status': status,
+                       'scoped': _scoped(week['id']),
                        'share': moved_w / moved_s if status == 'measured' else None,
                        'session_points': round(moved_s, 2), 'weekly_points': round(moved_w, 2),
                        'cycles': len(cycles), 'needed_session_points': MIN_SESSION,

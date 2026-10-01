@@ -61,7 +61,9 @@ class LedgerTests(unittest.TestCase):
                  {'id': 'codex_other:secondary', 'used_percent': 10, 'resets_at': WEEK_RESET, 'window_minutes': 10080}]
         # Pairs only form inside one quota bucket.
         self.assertEqual([(s['id'], w['id']) for s, w in b.pairs(codex)], [('codex:primary', 'codex:secondary')])
-        self.assertEqual([(s['id'], w['id']) for s, w in b.pairs(reading(0, 0, extra=[scoped(38)]))], [('five_hour', 'seven_day')])
+        # A model-scoped weekly cap is measured against the account's 5-hour window.
+        self.assertEqual([(s['id'], w['id']) for s, w in b.pairs(reading(0, 0, extra=[scoped(38)]))],
+                         [('five_hour', 'seven_day'), ('five_hour', 'weekly_scoped:fable')])
 
     def test_a_weekly_cap_that_never_moves_with_the_session_is_unrelated(self):
         state = self.feed([reading(0, 40), reading(35, 40), reading(70, 40)])
