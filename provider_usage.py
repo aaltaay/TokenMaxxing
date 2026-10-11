@@ -20,6 +20,8 @@ import time
 from datetime import datetime
 from urllib import error, request
 
+from cursor_usage import hud_dir
+
 CACHE_SECONDS = 60
 # A reading is held and labelled with its age rather than blanked: quota
 # windows run for hours, so a few minutes old is still the truth on screen.
@@ -68,7 +70,8 @@ def _timestamp(value):
     return None
 
 
-def _provider(provider_id, source, windows=None, reason=None, fetched_at=None, retry_after=None):
+def _provider(provider_id, source, windows=None, reason=None, fetched_at=None, retry_after=None,
+              needs_sign_in=False):
     result = {
         "id": provider_id,
         "label": "Codex" if provider_id == "codex" else "Claude",
@@ -81,6 +84,8 @@ def _provider(provider_id, source, windows=None, reason=None, fetched_at=None, r
         result["reason"] = reason
     if retry_after:
         result["retry_after"] = retry_after
+    if needs_sign_in:
+        result["needs_sign_in"] = True
     return result
 
 
@@ -265,7 +270,8 @@ def _read_codex():
         return _provider("codex", CODEX_SOURCE, reason="Codex quota request timed out.")
     except (OSError, RuntimeError, ValueError):
         return _provider("codex", CODEX_SOURCE,
-                         reason="Codex quota could not be read. Check the existing Codex sign-in.")
+                         reason="Codex quota could not be read. Check the existing Codex sign-in.",
+                         needs_sign_in=True)
     finally:
         if process is not None:
             if process.poll() is None:
@@ -294,11 +300,11 @@ def _read_claude():
         auth = data.get("claudeAiOauth") if isinstance(data, dict) else None
         token = auth.get("accessToken") if isinstance(auth, dict) else None
         if not isinstance(token, str) or not token:
-            return _provider("claude", CLAUDE_SOURCE,
+            return _provider("claude", CLAUDE_SOURCE, needs_sign_in=True,
                              reason="No Claude Code subscription sign-in is available.")
         expires = _number(auth.get("expiresAt"))
         if expires is not None and expires / 1000 <= time.time():
-            return _provider("claude", CLAUDE_SOURCE,
+            return _provider("claude", CLAUDE_SOURCE, needs_sign_in=True,
                              reason="Claude Code sign-in has expired. Open Claude Code to reconnect.")
         req = request.Request("https://api.anthropic.com/api/oauth/usage", headers={
             "Authorization": f"Bearer {token}",
@@ -309,10 +315,12 @@ def _read_claude():
             payload = response.read(1024 * 1024)
         return normalize_claude(json.loads(payload))
     except FileNotFoundError:
-        reason = "No Claude Code subscription sign-in is available."
+        return _provider("claude", CLAUDE_SOURCE, needs_sign_in=True,
+                         reason="No Claude Code subscription sign-in is available.")
     except error.HTTPError as exc:
         if exc.code in (401, 403):
-            reason = "Claude did not authorize quota access. Check the existing Claude Code sign-in."
+            return _provider("claude", CLAUDE_SOURCE, needs_sign_in=True,
+                             reason="Claude did not authorize quota access. Check the existing Claude Code sign-in.")
         elif exc.code == 429:
             retry = exc.headers.get("Retry-After") if exc.headers else None
             try:
@@ -358,13 +366,46 @@ def peek_provider_usage():
         return _mark_stale(_cache)
 
 
-def _hold(provider_id, source, note):
+def _saved_path():
+    return hud_dir() / "provider-last-good.json"
+
+
+def _save_last_good():
+    try:
+        path = _saved_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(_last_good), encoding="utf-8")
+        temporary.replace(path)
+    except OSError:
+        pass
+
+
+def _saved_reading(provider_id):
+    """The last good reading from an earlier run, so a restart that meets a
+    refusal still shows the quota instead of a blank card."""
+    try:
+        saved = json.loads(_saved_path().read_text(encoding="utf-8")).get(provider_id)
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(saved, dict) or saved.get("status") != "ok" or not saved.get("windows"):
+        return None
+    return saved
+
+
+def _hold(provider_id, source, note, needs_sign_in=False):
     """Show the last reading that returned data, labelled with why it is old."""
     held = _last_good.get(provider_id)
+    if not held and not needs_sign_in:
+        held = _saved_reading(provider_id)
+        if held:
+            _last_good[provider_id] = held
     if not held:
-        return _provider(provider_id, source, reason=note)
+        return _provider(provider_id, source, reason=note, needs_sign_in=needs_sign_in)
     held = copy.deepcopy(held)
     held["warning"] = note
+    if needs_sign_in:
+        held["needs_sign_in"] = True
     return held
 
 
@@ -394,10 +435,12 @@ def _fetch_one(provider_id, source, reader, force):
     if result.get("status") == "ok":
         _backoff_until.pop(provider_id, None)
         _last_good[provider_id] = result
+        _save_last_good()
         return result
     # A failed request never becomes zero usage, and never blanks a reading
     # that was true minutes ago; staleness alone retires it.
-    return _hold(provider_id, source, result.get("reason") or "Quota request returned no data.")
+    return _hold(provider_id, source, result.get("reason") or "Quota request returned no data.",
+                 needs_sign_in=bool(result.get("needs_sign_in")))
 
 
 def get_provider_usage(force=False):

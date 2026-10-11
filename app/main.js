@@ -280,7 +280,7 @@ ipcMain.handle('engine:call', async (_event, cmd, args) => {
   if (!bridge) throw new Error('engine not started');
   if (cmd === 'sessions') args = {...args, active_title: activeChat.currentTitle(args?.provider === 'claude' ? 'claude' : 'codex')};
   // The cycle fetch pages the dashboard and can legitimately run long.
-  const timeout = cmd === 'cycle' ? 180000 : cmd === 'providers' ? 45000 : 30000;
+  const timeout = cmd === 'cycle' ? 180000 : cmd === 'overview' ? 120000 : cmd === 'providers' ? 45000 : 30000;
   return bridge.call(cmd, args || {}, timeout);
 });
 

@@ -465,11 +465,15 @@ def _event_summaries(events: list[dict], local: dict, cloud: dict,
                      auto_models: list) -> dict:
     by_model, by_day, by_conv = {}, {}, {}
     headless, interactive, unclassified = ({"n": 0, "cents": 0.0} for _ in range(3))
+    # The minutes requests happened in, for time-at-the-keyboard and agent time.
+    minutes = {"interactive": set(), "headless": set()}
     for ev in events:
         tu = ev.get("tokenUsage") or {}
         cents = _event_cents(ev)
         model = ev.get("model") or "Unknown model"
         ts = iso_to_ms(ev.get("timestamp"))
+        if ts is not None:
+            minutes["headless" if ev.get("isHeadless") is True else "interactive"].add(int(ts // 60000) * 60)
         try:
             day = datetime.fromtimestamp(ts / 1000).astimezone().strftime("%Y-%m-%d") if ts is not None else "Unknown date"
         except (OSError, ValueError, OverflowError):
@@ -518,7 +522,8 @@ def _event_summaries(events: list[dict], local: dict, cloud: dict,
             "days": [{"date": day, **by_day[day]} for day in sorted(by_day)],
             "conversations": conversations,
             "headless": headless, "interactive": interactive,
-            "unclassified": unclassified}
+            "unclassified": unclassified,
+            "activity_minutes": {kind: sorted(values) for kind, values in minutes.items()}}
 
 
 def fetch_cycle(force: bool = False) -> dict:

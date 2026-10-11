@@ -39,7 +39,8 @@ class ResetAttention {
     this.clearTimers();
     if (this.priorTop === null) this.priorTop = win.isAlwaysOnTop();
     const all = [...(this.active?.events || []), ...events];
-    this.active = {events: [...new Map(all.map(e => [e.id, e])).values()], pulsing: true};
+    // One entry per window and phase: a later reading replaces the earlier one.
+    this.active = {events: [...new Map(all.map(e => [withoutLastSegment(e.id), e])).values()], pulsing: true};
     if (win.isMinimized()) win.restore();
     win.setAlwaysOnTop(true, 'screen-saver');
     win.show();
