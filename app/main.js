@@ -232,7 +232,7 @@ function createWindow() {
     titleBarOverlay:
       process.platform === 'darwin'
         ? undefined
-        : { color: '#00000000', symbolColor: '#e9e9ee', height: 44 },
+        : { color: '#0c0c0f', symbolColor: '#e9e9ee', height: 44 },
     trafficLightPosition: { x: 18, y: 18 },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),

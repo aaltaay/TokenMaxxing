@@ -95,7 +95,17 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   backdrop-filter: saturate(180%) blur(20px);
   border-bottom: 1px solid var(--hairline);
 }
+html.is-mac .titlebar,
 body.is-mac .titlebar { --titlebar-inset: 84px; }
+
+/* Windows paints min / max / close on top of this bar (titleBarOverlay).
+   138px is three 46px caption buttons; the extra 12px keeps the pin from
+   touching minimize. windowControlsOverlay replaces the fallback when it
+   can measure the real strip. */
+html.is-win .titlebar,
+body.is-win .titlebar {
+  padding-right: var(--caption-inset, 150px);
+}
 
 .brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .brand-mark { flex: none; display: block; }
