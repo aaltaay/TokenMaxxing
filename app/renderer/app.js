@@ -1989,9 +1989,26 @@ function showSmsStatus(status) {
 
 // ── boot ──────────────────────────────────────────────────────────────────
 
+// The caption strip width is not a constant across DPI. Measure the area
+// Chromium leaves for the titlebar and keep the pin, refresh, and bell
+// to the left of it. Until boot measures it, the 150px fallback in the CSS
+// holds, keyed off the class the preload puts on <html> before first paint.
+function syncCaptionInset() {
+  const overlay = navigator.windowControlsOverlay;
+  if (!overlay || typeof overlay.getTitlebarAreaRect !== 'function') return;
+  const area = overlay.getTitlebarAreaRect();
+  const inset = Math.round(window.innerWidth - area.x - area.width);
+  if (inset < 40) return;
+  document.documentElement.style.setProperty('--caption-inset', `${inset + 12}px`);
+}
+
 async function boot() {
   const { platform, alwaysOnTop, openSmsSetup, openSessions } = await window.hud.windowState();
   document.body.classList.toggle('is-mac', platform === 'darwin');
+  document.body.classList.toggle('is-win', platform === 'win32');
+  syncCaptionInset();
+  window.addEventListener('resize', syncCaptionInset);
+  navigator.windowControlsOverlay?.addEventListener?.('geometrychange', syncCaptionInset);
   $('btnPin').setAttribute('aria-pressed', String(alwaysOnTop));
   positionThumb();
 
