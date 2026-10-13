@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('hud', {
   updateStatus: () => ipcRenderer.invoke('updates:status'),
   checkUpdates: () => ipcRenderer.invoke('updates:check'),
   installUpdate: () => ipcRenderer.invoke('updates:install'),
+  laterUpdate: () => ipcRenderer.invoke('updates:later'),
   previewResetAlert: () => ipcRenderer.invoke('reset:preview'),
   resetAlertStatus: () => ipcRenderer.invoke('reset:status'),
   dismissResetAlert: () => ipcRenderer.invoke('reset:dismiss'),

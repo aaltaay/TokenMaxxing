@@ -70,7 +70,10 @@
       <div class="bell-status"><span class="dot" id="statusDot"></span><span id="statusText">Starting…</span><span class="bell-events" id="statusEvents"></span></div>
       <div class="bell-update">
         <span id="updateStatus" role="status" aria-live="polite">Checking app version…</span>
-        <button class="chip" id="btnUpdate" type="button">Check for updates</button>
+        <span class="bell-update-actions">
+          <button class="chip" id="btnUpdateLater" type="button" hidden>Later</button>
+          <button class="chip" id="btnUpdate" type="button">Check for updates</button>
+        </span>
       </div>
     </div>
   </div>
