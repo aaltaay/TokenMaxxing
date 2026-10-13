@@ -44,6 +44,10 @@
         "to": "active-chat.ps1"
       },
       {
+        "from": "focus.ps1",
+        "to": "focus.ps1"
+      },
+      {
         "from": "../cli_statusline.py",
         "to": "cli_statusline.py"
       }

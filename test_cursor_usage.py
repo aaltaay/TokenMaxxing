@@ -1,5 +1,6 @@
 """Integrity checks for observed Cursor values and complete event ranges."""
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -10,6 +11,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import cursor_usage as cu
+import ledger
 
 
 class NumericIntegrityTests(unittest.TestCase):
@@ -156,8 +158,10 @@ class ReportTests(unittest.TestCase):
             db.touch()
             if cache is not None:
                 path.write_text(json.dumps(cache))
-            self.activity = Path(directory) / "activity.json"
-            for name, value in (("cache_path", path), ("activity_path", self.activity), ("cursor_state_db", db),
+            # The ledger the refresh keeps events in, closed before the folder goes.
+            stack.enter_context(patch.dict(os.environ, {"TOKEN_HUD_DIR": directory}))
+            stack.callback(ledger.close)
+            for name, value in (("cache_path", path), ("cursor_state_db", db),
                                 ("connect", MagicMock()), ("session_cookie", "unused"),
                                 ("access_token", None),
                                 ("chat_names", {}), ("cloud_agent_names", {})):
@@ -174,7 +178,11 @@ class ReportTests(unittest.TestCase):
             if events is not None:
                 stack.enter_context(patch.object(cu, "fetch_events", return_value=events))
             result = cu.fetch_cycle()
-            self.stored = json.loads(self.activity.read_text()) if self.activity.exists() else None
+            led = ledger.default()
+            self.stored = led.cursor_minutes("test@example.com")
+            with led.reading() as con:
+                self.events = con.execute("SELECT t, cents FROM cursor_events ORDER BY t").fetchall()
+                self.coverage = con.execute("SELECT start, end FROM cursor_coverage").fetchall()
             return result, request.call_count
 
     def test_missing_source_values_are_not_fake_zeros_or_cycle_dates(self):
@@ -205,8 +213,24 @@ class ReportTests(unittest.TestCase):
                   "events_incomplete_reason": "timeout", "events_pages": 1}
         report, _ = self.fetch_mock_report(summary=summary, events=events)
         self.assertNotIn("activity_minutes", report)
-        self.assertEqual(self.stored["email"], "test@example.com")
-        self.assertEqual(len(self.stored["minutes"]["interactive"]), 1)
+        self.assertEqual(len(self.stored["interactive"]), 1)
+        # The event is kept too, but a fetch cut short covers no stretch of time.
+        self.assertEqual(len(self.events), 1)
+        self.assertEqual(self.coverage, [])
+
+    def test_a_complete_fetch_keeps_its_events_and_the_stretch_it_saw(self):
+        summary = {"billingCycleStart": "2026-09-01T00:00:00Z", "billingCycleEnd": "2026-10-01T00:00:00Z"}
+        stamp = int(time.time() * 1000)
+        events = {"events": [{"model": "a", "timestamp": str(stamp), "tokenUsage": {"totalCents": 5}},
+                             {"model": "a", "timestamp": str(stamp - 1000), "tokenUsage": {"totalCents": 2}}],
+                  "events_total": 2, "events_complete": True, "events_incomplete_reason": None, "events_pages": 1}
+        before = time.time()
+        self.fetch_mock_report(summary=summary, events=events)
+        self.assertEqual(self.events, [((stamp - 1000) / 1000, 2), (stamp / 1000, 5)])
+        (start, end), = self.coverage
+        self.assertEqual(start, cu.iso_to_ms("2026-09-01T00:00:00Z") / 1000)
+        self.assertLessEqual(end, time.time())
+        self.assertGreaterEqual(end, before - 1)
 
     def test_recorded_zero_spend_does_not_fall_back(self):
         report, _ = self.fetch_mock_report(summary={"individualUsage": {"plan": {"breakdown": {"total": 99}}}},
@@ -310,7 +334,8 @@ class ActivityStoreTests(unittest.TestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(cu, "cache_path", return_value=self.cache))
-        self.stack.enter_context(patch.object(cu, "activity_path", return_value=root / "cursor-activity.json"))
+        self.stack.enter_context(patch.dict(os.environ, {"TOKEN_HUD_DIR": str(root)}))
+        self.stack.callback(ledger.close)
         self.identity = self.stack.enter_context(patch.object(
             cu, "_current_cursor_identity", return_value=("test-session", "test@example.com")))
         self.now = 1791900000
@@ -320,29 +345,29 @@ class ActivityStoreTests(unittest.TestCase):
         return {"timestamp": str(int(at * 1000)), "isHeadless": False, **extra}
 
     def test_a_partial_refresh_never_takes_minutes_away(self):
-        cu.remember_activity("test@example.com", [self.event(self.now - 600), self.event(self.now - 60)], now=self.now)
-        cu.remember_activity("Test@Example.com", [self.event(self.now - 60)], now=self.now)
+        cu.remember_activity("test@example.com", [self.event(self.now - 600), self.event(self.now - 60)])
+        cu.remember_activity("Test@Example.com", [self.event(self.now - 60)])
         self.assertEqual(cu.read_activity_minutes()["interactive"], [self.now - 600, self.now - 60])
 
     def test_minutes_are_sorted_by_who_made_the_request(self):
         cu.remember_activity("test@example.com", [self.event(self.now, conversationId="sand-subagent-1"),
-                                                  self.event(self.now - 120, isHeadless=True)], now=self.now)
+                                                  self.event(self.now - 120, isHeadless=True)])
         self.assertEqual(cu.read_activity_minutes(), {"interactive": [], "headless": [self.now - 120],
                                                       "subagent": [self.now]})
 
-    def test_minutes_older_than_any_range_are_forgotten(self):
-        old = self.now - cu.ACTIVITY_KEEP_S - 60
-        cu.remember_activity("test@example.com", [self.event(old), self.event(self.now)], now=self.now)
-        self.assertEqual(cu.read_activity_minutes()["interactive"], [self.now])
+    def test_minutes_are_kept_past_any_range(self):
+        old = self.now - 400 * 86400
+        cu.remember_activity("test@example.com", [self.event(old), self.event(self.now)])
+        self.assertEqual(cu.read_activity_minutes()["interactive"], [old, self.now])
 
-    def test_another_accounts_minutes_are_never_shown_or_kept(self):
-        cu.remember_activity("previous@example.com", [self.event(self.now - 600)], now=self.now)
+    def test_another_accounts_minutes_are_never_shown(self):
+        cu.remember_activity("previous@example.com", [self.event(self.now - 600)])
         self.assertIsNone(cu.read_activity_minutes())
-        cu.remember_activity("test@example.com", [self.event(self.now)], now=self.now)
+        cu.remember_activity("test@example.com", [self.event(self.now)])
         self.assertEqual(cu.read_activity_minutes()["interactive"], [self.now])
 
     def test_signed_out_shows_no_minutes(self):
-        cu.remember_activity("test@example.com", [self.event(self.now)], now=self.now)
+        cu.remember_activity("test@example.com", [self.event(self.now)])
         for identity in ((None, "test@example.com"), ("session", None)):
             with self.subTest(identity=identity):
                 self.identity.return_value = identity
@@ -354,9 +379,53 @@ class ActivityStoreTests(unittest.TestCase):
         self.cache.write_text(json.dumps({"email": "test@example.com", "activity_minutes": {
             "interactive": [self.now - 600], "headless": [], "subagent": []}}))
         self.assertEqual(cu.read_activity_minutes()["interactive"], [self.now - 600])
-        cu.remember_activity("test@example.com", [self.event(self.now)], now=self.now)
+        cu.remember_activity("test@example.com", [self.event(self.now)])
         self.cache.write_text(json.dumps({"email": "test@example.com"}))
         self.assertEqual(cu.read_activity_minutes()["interactive"], [self.now - 600, self.now])
+
+
+class EventIdentityTests(unittest.TestCase):
+    """A dashboard event fetched again is the same event, whatever it says now."""
+
+    def event(self, **extra):
+        return {"timestamp": "1791900000123", "model": "m", "conversationId": "c", "isHeadless": False,
+                "tokenUsage": {"inputTokens": 1, "totalCents": 1.0}, **extra}
+
+    def test_the_key_leaves_out_values_that_may_be_corrected(self):
+        key = cu.event_key("a@example.com", self.event())
+        self.assertEqual(cu.event_key("a@example.com", self.event(tokenUsage={"inputTokens": 9, "totalCents": 4.0})), key)
+        self.assertEqual(cu.event_key("a@example.com", self.event(timestamp="2026-10-08T04:00:00.123Z")),
+                         cu.event_key("a@example.com", self.event(timestamp=str(cu.iso_to_ms("2026-10-08T04:00:00.123Z")))))
+        for other in (self.event(conversationId="d"), self.event(timestamp="1791900000124"), self.event(model="n")):
+            self.assertNotEqual(cu.event_key("a@example.com", other), key)
+        self.assertNotEqual(cu.event_key("b@example.com", self.event()), key)
+
+    def test_an_id_of_its_own_is_the_key(self):
+        self.assertEqual(cu.event_key("a@example.com", self.event(requestId="r1")),
+                         cu.event_key("a@example.com", self.event(requestId="r1", conversationId="z")))
+
+
+class CoverageTests(unittest.TestCase):
+    """The stretch of time a fetch saw every event of."""
+
+    T = 1791900000
+
+    def events(self, *seconds):
+        return [{"timestamp": str((self.T + s) * 1000)} for s in seconds]
+
+    def test_a_complete_fetch_covers_its_whole_range_up_to_when_it_began(self):
+        self.assertEqual(cu.fetch_coverage([], self.T * 1000, self.T + 2000.0, True), (self.T, self.T + 2000.0))
+        self.assertIsNone(cu.fetch_coverage([], None, self.T + 2000.0, True))
+
+    def test_a_fetch_cut_short_covers_from_its_oldest_event_when_pages_came_newest_first(self):
+        start, end = cu.fetch_coverage(self.events(1900, 1800, 1800, 1700), 0, self.T + 2000.0, False)
+        self.assertAlmostEqual(start, self.T + 1700.001, places=6)
+        self.assertEqual(end, self.T + 2000.0)
+
+    def test_otherwise_a_fetch_cut_short_covers_nothing(self):
+        for events in (self.events(1700, 1800), self.events(1900, 1700, 1800), self.events(1900),
+                       self.events(1800, 1800), [{"timestamp": None}, {"timestamp": "1"}], []):
+            self.assertIsNone(cu.fetch_coverage(events, 0, self.T + 2000.0, False))
 
 
 class FetchCoordinationTests(unittest.TestCase):

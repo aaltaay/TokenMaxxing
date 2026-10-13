@@ -18,6 +18,7 @@ new MutationObserver((_records, observer) => {
 contextBridge.exposeInMainWorld('hud', {
   call: (cmd, args) => ipcRenderer.invoke('engine:call', cmd, args),
   engineStatus: () => ipcRenderer.invoke('engine:status'),
+  appVersion: () => ipcRenderer.invoke('app:version'),
   updateStatus: () => ipcRenderer.invoke('updates:status'),
   checkUpdates: () => ipcRenderer.invoke('updates:check'),
   installUpdate: () => ipcRenderer.invoke('updates:install'),

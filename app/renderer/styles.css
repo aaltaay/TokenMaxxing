@@ -120,6 +120,23 @@ body.is-win .titlebar {
 .bm-xx { letter-spacing: -0.07em; padding-right: 0.1em; }
 .bm-soft { opacity: 0.66; }
 .brand-mark { color: var(--ink); }
+/* Lets the subtitle ellipsize instead of running under the buttons. */
+.brand-text { min-width: 0; }
+.brand-line { display: flex; align-items: center; gap: 6px; }
+/* The running version: quiet, achromatic, like the wordmark. */
+.brand-ver {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 5px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 15px;
+  color: var(--ink-3);
+  background: rgba(255, 255, 255, 0.08);
+  font-variant-numeric: tabular-nums;
+}
+.brand-ver[hidden] { display: none; }
 .brand-sub {
   font-size: 11px;
   color: var(--ink-3);
@@ -827,6 +844,10 @@ button.wc-tile { font: inherit; color: inherit; text-align: left; cursor: pointe
 .tooltip.is-on { opacity: 1; }
 .tooltip b { font-weight: 600; }
 .tooltip .muted { color: var(--ink-3); }
+/* An explanation: a title, then how the figure was worked out. */
+.tooltip.is-explain { max-width: 300px; padding: 9px 11px; }
+.tooltip .tip-title { display: block; color: var(--ink); }
+.tooltip.is-explain p { margin: 5px 0 0; color: var(--ink-2); overflow-wrap: anywhere; }
 
 /* narrow window: the dial stacks above the legend, tiles go two-up */
 @media (max-width: 620px) {
@@ -977,27 +998,55 @@ button.wc-tile { font: inherit; color: inherit; text-align: left; cursor: pointe
 }
 
 /* ── overview ─────────────────────────────────────────────────────────── */
+/* One column that reads top-down in a narrow window: value, your time
+   against the agents', the days, then what the agents did. Two-up grids
+   open only where the window is wide enough. */
 .ov { --ov-a2: #a99ff7; --ov-a3: #4b3fb0; --ov-track: #26262d;
   --ov-you: #fbbf24; --ov-cursor: #38bdf8; --ov-claude: #f97352; --ov-codex: #34d399;
+  /* The other AI tools you can be in: ChatGPT a lighter tint of Codex's green
+     (same maker), the editors and the terminal the palette's spare hues. */
+  --ov-chatgpt: #a7f3d0; --ov-vscode: var(--brand-6); --ov-windsurf: #a99ff7; --ov-terminal: #a1a1aa; --ov-other: #6e6e76;
+  /* Not read yet: neutral hatching, so an unknown day never reads as zero. */
+  --ov-hatch: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.11) 0 2px, transparent 2px 6px);
   display: grid; gap: 12px; }
 .ov-loading { padding: 60px 0; text-align: center; color: var(--ink-3); font-size: 12.5px; }
 .ov-ranges { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; margin-bottom: 12px; }
 .ov.is-stale { opacity: 0.45; transition: opacity 0.2s var(--ease); }
-.ov-dcol.is-later { opacity: 0.35; }
-.ov-eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.13em; text-transform: uppercase; color: var(--ink-3); }
+.ov-eyebrow { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.13em; text-transform: uppercase; color: var(--ink-3); }
 .ov-muted { font-size: 11px; color: var(--ink-3); }
 .ov-muted b { color: var(--ink-2); }
 .ov-gap { margin-top: 12px; }
 .ov-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .ov-head h2 { margin: 0; font-size: 13.5px; font-weight: 650; letter-spacing: -0.01em; }
-.ov-sw { display: inline-block; width: 9px; height: 9px; border-radius: 3px; background: var(--c); }
-.ov-legend { display: flex; gap: 12px; font-size: 11px; color: var(--ink-2); }
+.ov-sw { display: inline-block; flex: none; width: 9px; height: 9px; border-radius: 3px; background: var(--c); }
+.ov-sw.is-est { background: transparent; border: 1.5px dashed var(--ov-you); }
+.ov-sw.is-pending { background: var(--ov-hatch); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14); }
+.ov-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: var(--ink-2); }
 .ov-legend span { display: flex; align-items: center; gap: 6px; }
 
+/* Anything that explains itself on hover says so with the help cursor, and
+   an explained figure inside a sentence wears a dotted underline. */
+.ov [data-explain]:not(button) { cursor: help; }
+.ov-note b[data-explain] { border-bottom: 1px dotted var(--ink-4); }
+
+/* A total still being built: a dashed pill, so it reads as provisional. */
+.ov-sofar { display: inline-block; padding: 0 6px; border: 1px dashed rgba(255, 255, 255, 0.3); border-radius: 99px;
+  font-size: 10px; font-weight: 600; line-height: 15px; letter-spacing: 0; text-transform: none; color: var(--ink-2); }
+
+/* The one-time history build. */
+.ov-build { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-radius: 12px; font-size: 11.5px; color: var(--ink-2);
+  background: rgba(124, 108, 240, 0.08); border: 1px solid rgba(124, 108, 240, 0.24); }
+.ov-build-t { flex: 1; min-width: 0; }
+.ov-build-bar { flex: 0 0 88px; height: 4px; border-radius: 9px; background: var(--ov-track); overflow: hidden; }
+.ov-build-bar i { display: block; height: 100%; width: var(--w); border-radius: 9px; background: var(--accent); transition: width 0.4s var(--ease); }
+
+/* 1 · value against subscriptions */
 .ov-hero { padding: 20px; overflow: hidden; background:
   radial-gradient(120% 140% at 100% 0%, rgba(124, 108, 240, 0.35), transparent 55%),
   radial-gradient(80% 120% at 0% 100%, rgba(124, 108, 240, 0.12), transparent 60%), var(--card); }
-.ov-hero-row { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-top: 8px; }
+.ov-hero-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: 12px 16px; margin-top: 8px; }
+.ov-value { min-width: 0; border-radius: 10px; }
 .ov-big { font-size: 60px; font-weight: 800; letter-spacing: -0.04em; line-height: 1; font-variant-numeric: tabular-nums;
   background: linear-gradient(180deg, #fff 30%, #c9c2fb); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .ov-big small { font-size: 28px; letter-spacing: -0.02em; }
@@ -1016,65 +1065,41 @@ button.wc-tile { font: inherit; color: inherit; text-align: left; cursor: pointe
 .ov-price-in { display: inline-flex; align-items: center; gap: 3px; color: var(--ink-3); }
 .ov-price-in input { width: 64px; padding: 4px 6px; border-radius: 7px; border: 1px solid rgba(255, 255, 255, 0.1);
   background: var(--raised); color: var(--ink); font: inherit; font-variant-numeric: tabular-nums; }
-.ov-split { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 18px; }
+.ov-split { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 18px; }
 .ov-pc { padding: 10px 12px; border-radius: 12px; background: rgba(0, 0, 0, 0.22); border: 1px solid rgba(255, 255, 255, 0.06); }
+.ov-pc:hover { border-color: color-mix(in srgb, var(--pcol) 35%, transparent); }
 .ov-pc-h { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; color: var(--ink-2); }
 .ov-mk { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; color: var(--c);
   background: color-mix(in srgb, var(--c) 16%, transparent); }
 .ov-pc-v { margin-top: 6px; font-size: 22px; font-weight: 800; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
 .ov-pc-t { margin-top: 1px; font-size: 11.5px; color: var(--ink-3); }
 .ov-pc-t b { color: var(--ink-2); }
-.ov-bar, .ov-track, .ov-lb, .ov-tbar { display: block; height: 4px; border-radius: 9px; background: var(--ov-track); overflow: hidden; }
+.ov-bar, .ov-lb, .ov-tbar { display: block; height: 4px; border-radius: 9px; background: var(--ov-track); overflow: hidden; }
 .ov-bar { margin-top: 8px; }
-.ov-bar i, .ov-track i, .ov-lb i, .ov-tbar i { display: block; height: 100%; width: var(--w); border-radius: 9px; background: var(--accent); }
+.ov-bar i, .ov-lb i, .ov-tbar i { display: block; height: 100%; width: var(--w); border-radius: 9px; background: var(--accent); }
 .ov-bar i { background: var(--pcol, var(--accent)); }
 .ov-lb i { background: var(--c); }
-.ov-cycle { display: flex; align-items: center; gap: 10px; margin-top: 14px; font-size: 11.5px; color: var(--ink-3); }
-.ov-cycle b { color: var(--ink-2); }
-.ov-cycle .ov-hi { color: var(--ov-a2); }
-.ov-track { flex: 1; }
-.ov-track i { background: var(--ink-3); }
 
+/* 2 · your time against agent time */
 .ov-time { display: grid; grid-template-columns: 1.1fr 1fr; gap: 18px; align-items: center; }
 .ov-vs { display: flex; align-items: flex-end; gap: 14px; margin-top: 8px; }
+.ov-who { min-width: 0; border-radius: 8px; }
 .ov-arrow { padding-bottom: 22px; font-size: 22px; color: var(--ink-3); }
-.ov-desk-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
-.ov-dstat { display: flex; flex-direction: column; gap: 4px; padding: 9px 11px; border-radius: 11px;
-  background: rgba(0, 0, 0, 0.2); border: 1px solid rgba(255, 255, 255, 0.06); }
-.ov-dstat span { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ov-dstat span i { display: none; }
-.ov-dstat b { font-size: 15px; font-weight: 800; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
-.ov-dstat.is-hi { border-color: color-mix(in srgb, var(--c) 30%, transparent); }
-.ov-dstat.is-hi span i { display: block; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--c); }
-.ov-dstat.is-hi b { color: var(--c); }
-.ov-desk-plot { position: relative; display: flex; align-items: flex-end; gap: 5px; height: 132px; margin-top: 26px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
-.ov-desk-ref, .ov-desk-avg { position: absolute; left: 0; right: 0; bottom: var(--y); height: 0; pointer-events: none; z-index: 1; }
-.ov-desk-ref { border-top: 1px dashed rgba(255, 255, 255, 0.12); }
-.ov-desk-avg { border-top: 1.5px dashed rgba(255, 255, 255, 0.55); }
-.ov-desk-ref span, .ov-desk-avg span { position: absolute; right: 0; bottom: 3px; padding: 1px 6px; border-radius: 6px; font-size: 10px;
-  background: rgba(10, 10, 14, 0.85); color: var(--ink-3); }
-.ov-desk-avg span { color: var(--ink); font-weight: 650; }
-.ov-dcol { position: relative; flex: 1; display: flex; align-items: flex-end; height: 100%; min-width: 0; }
-.ov-dbar { --c: var(--accent); position: relative; width: 100%; height: var(--h); min-height: 3px; border-radius: 5px 5px 2px 2px;
-  background: color-mix(in srgb, var(--c) calc(var(--o) * 100%), var(--ov-track)); }
-.ov-dbar.is-best { --c: var(--ov-you); background: var(--c); }
-.ov-dval { position: absolute; bottom: calc(100% + 4px); left: 50%; transform: translateX(-50%); font-size: 10px; font-weight: 650;
-  color: var(--ink-2); white-space: nowrap; }
-.ov-dbar.is-best .ov-dval { color: var(--ov-you); font-weight: 800; }
-.ov-desk-x { display: flex; gap: 5px; margin-top: 6px; }
-.ov-desk-x span { flex: 1; min-width: 0; font-size: 10px; color: var(--ink-3); white-space: nowrap; overflow: visible; }
-.ov-desk-x .is-today { color: var(--ink-2); text-align: right; }
-
 .ov-hours { font-size: 36px; font-weight: 800; letter-spacing: -0.04em; line-height: 1; font-variant-numeric: tabular-nums; }
 .ov-hours small { margin-left: 2px; font-size: 20px; letter-spacing: 0; color: var(--ink-2); }
 .ov-hours.is-you { color: var(--ov-you); }
 .ov-cap { margin-top: 4px; font-size: 11.5px; color: var(--ink-3); }
-.ov-lev { margin-top: 12px; font-size: 12.5px; color: var(--ink-2); }
+/* Measured time is filled amber; an estimate is a dashed outline, everywhere. */
+.ov-basis { display: inline-block; padding: 0 6px; border-radius: 99px; font-size: 10.5px; line-height: 16px; white-space: nowrap;
+  color: var(--ov-you); background: color-mix(in srgb, var(--ov-you) 13%, transparent); }
+.ov-basis.is-est { line-height: 14px; color: var(--ink-2); background: transparent;
+  border: 1px dashed color-mix(in srgb, var(--ov-you) 60%, transparent); }
+.ov-lev { margin-top: 12px; font-size: 12.5px; color: var(--ink-2); border-radius: 8px; }
 .ov-lev b { margin-right: 6px; font-size: 18px; font-weight: 800; color: var(--ov-a2); }
 .ov-note { margin: 8px 0 0; font-size: 12.5px; line-height: 1.45; color: var(--ink-2); }
 .ov-note b { color: var(--ink); }
 .ov-lanes { display: grid; gap: 10px; }
+.ov-lane { border-radius: 8px; }
 .ov-lt { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--ink-2); }
 .ov-lt b { color: var(--ink); }
 .ov-lb { height: 10px; margin-top: 5px; }
@@ -1086,41 +1111,73 @@ button.wc-tile { font: inherit; color: inherit; text-align: left; cursor: pointe
 .ov-dots { display: flex; flex-wrap: wrap; gap: 3px; width: 98px; margin-left: auto; }
 .ov-dots i { width: 8px; height: 8px; border-radius: 2px; background: var(--accent); }
 
+.ov-focus-sub { margin: 2px 0 2px; }
+.ov-arow { display: grid; grid-template-columns: minmax(92px, 40%) 1fr 76px; gap: 10px; align-items: center; margin-top: 9px;
+  font-size: 12px; border-radius: 6px; }
+.ov-aname { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-arow .ov-tbar i { background: var(--c); }
+.ov-arow .ov-tbar i.is-est { background: transparent; border: 1.5px dashed var(--ov-you); }
+
+/* 3 · day by day: your time above, agent time below, one shared axis */
+.ov-sub { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; margin-top: 14px;
+  font-size: 12px; color: var(--ink-2); }
+.ov-sub > span { border-radius: 6px; }
+.ov-sub b { color: var(--ink); }
+.ov-plot { position: relative; display: flex; gap: 6px; height: 112px; margin-top: 8px; padding-top: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
+.ov-plot::before { content: ""; position: absolute; left: 0; right: 0; top: 16px; border-top: 1px dashed rgba(255, 255, 255, 0.08); pointer-events: none; }
+.ov-plot-top { position: absolute; left: 0; top: 16px; transform: translateY(-50%); padding-right: 5px; font-size: 9.5px; line-height: 1;
+  color: var(--ink-4); background: var(--card); z-index: 1; pointer-events: none; }
+.ov-plot.is-dense, .ov-axis.is-dense { gap: 3px; }
+.ov-pcol { position: relative; flex: 1; min-width: 0; border-radius: 4px 4px 0 0; }
+.ov-pcol:hover, .ov-pcol:focus-visible { background-color: rgba(255, 255, 255, 0.05); }
+.ov-pcol:focus-visible { outline-offset: 1px; }
+.ov-stack { position: absolute; left: 0; right: 0; bottom: 0; height: var(--h); min-height: 2px; display: flex; flex-direction: column-reverse;
+  gap: 1px; border-radius: 4px 4px 1px 1px; overflow: hidden; }
+.ov-stack i { display: block; flex: var(--f) 0 0; min-height: 0; background: var(--c); }
+.ov-pcol.is-estimated .ov-stack { border: 1.5px dashed var(--ov-you); background: color-mix(in srgb, var(--ov-you) 9%, transparent); }
+.ov-pcol.is-pending { background-image: var(--ov-hatch); }
+.ov-pval { position: absolute; left: 50%; bottom: calc(var(--h) + 3px); transform: translateX(-50%); font-size: 10px; font-weight: 650;
+  color: var(--ink-2); white-space: nowrap; pointer-events: none; }
+.ov-pcol.is-estimated .ov-pval { color: var(--ink-3); font-weight: 500; }
+.ov-axis { display: flex; gap: 6px; margin-top: 6px; }
+.ov-axis span { flex: 1; min-width: 0; font-size: 10px; color: var(--ink-3); white-space: nowrap; overflow: visible; text-align: center; }
+.ov-axis.is-dense span { text-align: left; }
+.ov-axis .is-today, .ov-axis.is-dense .is-today { color: var(--ink-2); text-align: right; }
+
+/* 4 · what the agents did */
+.ov > .ov-section { justify-self: start; display: flex; align-items: center; gap: 8px; margin: 8px 2px -2px; border-radius: 6px;
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.13em; text-transform: uppercase; color: var(--ink-3); }
 .ov-tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
 .ov-tile { padding: 13px 14px; }
 .ov-tv { margin-top: 6px; font-size: 24px; font-weight: 800; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
 .ov-tn { margin-top: 2px; font-size: 11.5px; color: var(--ink-3); }
 .ov-tn b { color: var(--ink-2); }
-
 .ov-two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.ov-bars { display: flex; gap: 8px; height: 150px; margin-top: 12px; }
-.ov-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 4px; min-width: 0; }
-.ov-col-v { font-size: 10px; color: var(--ink-2); white-space: nowrap; }
-.ov-col-bar { display: flex; flex-direction: column; gap: 1px; width: 100%; height: calc(var(--h) * 0.72);
-  border-radius: 4px 4px 1px 1px; overflow: hidden; }
-.ov-col-bar i { display: block; flex: var(--f) 0 0; background: var(--c); }
-.ov-col-x { font-size: 10.5px; color: var(--ink-3); }
-.ov-col-x.is-today { color: var(--ink-2); }
-.ov-bars.is-dense { gap: 3px; }
-.ov-bars.is-dense .ov-col-x { min-height: 1.3em; white-space: nowrap; }
 .ov-heat { display: grid; grid-template-columns: 28px repeat(24, 1fr); gap: 2px; align-items: center; margin-top: 14px; }
 .ov-heat-d { font-size: 10px; color: var(--ink-3); }
 .ov-heat i { aspect-ratio: 1; border-radius: 2px; background: #1f1f26; }
 .ov-heat i.is-on { background: rgba(124, 108, 240, var(--a)); }
+.ov-heat i:hover { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55); }
+.ov-heat i:focus-visible { outline: 2px solid var(--ink); outline-offset: 0; border-radius: 2px; }
 .ov-heat-x { display: grid; grid-template-columns: 28px repeat(4, 1fr); margin-top: 5px; font-size: 9.5px; color: var(--ink-3); }
-.ov-trow { display: grid; grid-template-columns: 80px 1fr 44px; gap: 10px; align-items: center; margin-top: 9px; font-size: 12px; }
+.ov-trow { display: grid; grid-template-columns: 80px 1fr 44px; gap: 10px; align-items: center; margin-top: 9px; font-size: 12px; border-radius: 6px; }
 .ov-tname { color: var(--ink-2); }
 .ov-tbar { height: 8px; }
 .ov-tc { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
 .ov-mix { display: flex; gap: 2px; height: 30px; margin-top: 14px; border-radius: 9px; overflow: hidden; }
 .ov-mix i { display: block; flex: 0 0 var(--w); background: var(--c); }
-.ov-mixl { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; margin-top: 12px; font-size: 11.5px; color: var(--ink-2); }
-.ov-mixl span { display: flex; align-items: center; gap: 7px; }
+.ov-mix i:hover { filter: brightness(1.2); }
+.ov-mixl { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 14px; margin-top: 12px; font-size: 11.5px; color: var(--ink-2); }
+.ov-mixl span { display: flex; align-items: center; gap: 7px; border-radius: 6px; }
 .ov-mixl b { margin-left: auto; color: var(--ink); font-variant-numeric: tabular-nums; }
-.ov-foot { font-size: 10.5px; line-height: 1.5; color: var(--ink-4); text-align: center; }
+.ov-foot { display: grid; gap: 4px; font-size: 10.5px; line-height: 1.5; color: var(--ink-4); text-align: center; }
+.ov-where { justify-self: center; color: var(--ink-3); border-radius: 6px; }
 
 @media (max-width: 620px) {
   .ov-time, .ov-two { grid-template-columns: 1fr; }
   .ov-tiles { grid-template-columns: repeat(2, 1fr); }
+  .ov-mixl { grid-template-columns: 1fr 1fr; }
   .ov-big { font-size: 46px; }
+  .ov-x { font-size: 32px; }
 }

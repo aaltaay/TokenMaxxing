@@ -1,23 +1,38 @@
 """Read account quota from provider services, never from elapsed clock time.
 
-Codex uses the documented app-server account/rateLimits/read RPC. Claude uses
-the read-only OAuth usage endpoint used by the installed Claude Code client.
-Credentials stay in memory and are never returned, logged, or copied to cache.
-No login, token refresh, model request, or quota-reset operation is performed.
+Codex uses the documented app-server account/rateLimits/read RPC, and the
+Codex app-server keeps its own ChatGPT sign-in renewed. Claude uses the
+read-only OAuth usage endpoint used by the installed Claude Code client, with
+the sign-in Claude Code keeps in .credentials.json. That access token lasts
+about eight hours, and for someone who works in the Claude desktop app (which
+signs its own sessions in) and never runs the `claude` CLI, nothing else
+renews the file, so it would lapse overnight. It is renewed here the way
+Claude Code renews it: with the stored refresh token, against Claude Code's
+own token endpoint and client id, under Claude Code's own refresh lock, and
+written back in place, in the same format, only over the sign-in it replaced.
+Only a refresh token the provider refuses asks for a new sign-in.
+
+Credentials stay in memory and in the file they came from; they are never
+returned, logged, or copied to cache. No login, model request, or quota-reset
+operation is performed. Plan names and emails come from local account files.
 """
 from __future__ import annotations
 
+import base64
 import copy
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import queue
+import re
 import shutil
 import subprocess
 import threading
 import time
 from datetime import datetime
+from http.client import HTTPException
 from urllib import error, request
 
 from cursor_usage import hud_dir
@@ -34,6 +49,26 @@ RATE_LIMIT_BACKOFF = 300.0
 MAX_BACKOFF = 1800.0
 CODEX_SOURCE = "Codex account/rateLimits/read"
 CLAUDE_SOURCE = "Claude Code OAuth usage"
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+# Claude Code's production OAuth client, as its own build defines it
+# (TOKEN_URL and CLIENT_ID in the 2.1.x bundle). Renewing with anything else
+# would mint a sign-in Claude Code does not recognise.
+CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+# The scopes Claude Code asks for when the stored sign-in does not list any.
+CLAUDE_SCOPES = ("user:profile", "user:inference", "user:sessions:claude_code",
+                 "user:mcp_servers", "user:file_upload", "user:plugins")
+# Claude Code renews five minutes before the stored expiry, so a request never
+# leaves with a token that lapses on the way; the same margin is used here.
+RENEW_MARGIN = 300
+RENEW_TIMEOUT = 15
+# Claude Code's refresh lock is a directory that its holder touches every few
+# seconds; one untouched for a minute was left by a process that died.
+LOCK_STALE_SECONDS = 60
+LOCK_ATTEMPTS = 4
+SIGNED_OUT = "No Claude Code subscription sign-in is available."
+EXPIRED = "Claude Code sign-in has expired. Open Claude Code to reconnect."
+USER_AGENT = "TokenMaxxing/1.0"
 _cache: dict | None = None
 _cache_time = 0.0
 _lock = threading.Lock()
@@ -46,6 +81,15 @@ _backoff_until: dict = {}
 # Codex and Claude are read on threads of their own; their saves of the last
 # good readings take turns, so neither overwrites the other's.
 _save_lock = threading.Lock()
+# A read that outlives its deadline can overlap the next one; renewals in this
+# process take turns too. Refresh tokens the provider refused are remembered
+# by fingerprint only, so a dead sign-in is not offered again every poll.
+_renew_lock = threading.Lock()
+_refused: set = set()
+# Tokens renewed here that could not be written back yet, keyed by the
+# fingerprint of the refresh token they replaced: if the provider rotated it,
+# the file's copy no longer works and these are the only good ones.
+_unsaved: dict = {}
 
 
 def _number(value):
@@ -295,31 +339,256 @@ class _NoRedirect(request.HTTPRedirectHandler):
         return None
 
 
-def _read_claude():
-    config = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-    credentials = config / ".credentials.json"
+def _claude_dir():
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+
+
+def _load_credentials(path):
+    """The whole credentials file and the Claude sign-in inside it."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return None, None
+    auth = data.get("claudeAiOauth")
+    return data, auth if isinstance(auth, dict) else None
+
+
+def _usable(auth):
+    token = auth.get("accessToken") if isinstance(auth, dict) else None
+    return isinstance(token, str) and bool(token)
+
+
+def _expiring(auth):
+    expires = _number(auth.get("expiresAt"))
+    return expires is not None and expires / 1000 - RENEW_MARGIN <= time.time()
+
+
+def _fingerprint(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _take_lock(path):
+    """Take one lock directory the way Claude Code's lock library does: mkdir
+    either creates it or fails, so two processes can never both hold it."""
+    for _ in range(2):
+        try:
+            path.mkdir()
+            return True
+        except FileExistsError:
+            try:
+                idle = time.time() - path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if idle <= LOCK_STALE_SECONDS:
+                return False
+            try:
+                path.rmdir()
+            except OSError:
+                return False
+        except OSError:
+            return False
+    return False
+
+
+class _RefreshLock:
+    """Claude Code's own refresh lock: the directory current builds take and
+    the one older builds take, so the HUD and a running Claude Code never spend
+    the same refresh token at once. A renewal holds it for seconds, well inside
+    the minute after which Claude Code would call it abandoned."""
+
+    def __init__(self, config):
+        self.paths = (config / ".oauth_refresh.lock", Path(os.path.realpath(config) + ".lock"))
+        self.held = []
+
+    def __enter__(self):
+        for path in self.paths:
+            if not _take_lock(path):
+                self.release()
+                return False
+            self.held.append(path)
+        return True
+
+    def __exit__(self, *_):
+        self.release()
+
+    def release(self):
+        while self.held:
+            try:
+                self.held.pop().rmdir()
+            except OSError:
+                pass
+
+
+def _write_credentials(path, data):
+    """Replace the file in one step, so no reader ever sees half of it. The
+    layout is Claude Code's own (compact JSON), and the file stays private."""
+    text = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    temporary = path.with_name(f"{path.name}.tokenmaxxing-{os.getpid()}-{threading.get_ident()}.tmp")
     try:
-        data = json.loads(credentials.read_text(encoding="utf-8"))
-        auth = data.get("claudeAiOauth") if isinstance(data, dict) else None
-        token = auth.get("accessToken") if isinstance(auth, dict) else None
-        if not isinstance(token, str) or not token:
-            return _provider("claude", CLAUDE_SOURCE, needs_sign_in=True,
-                             reason="No Claude Code subscription sign-in is available.")
-        expires = _number(auth.get("expiresAt"))
-        if expires is not None and expires / 1000 <= time.time():
-            return _provider("claude", CLAUDE_SOURCE, needs_sign_in=True,
-                             reason="Claude Code sign-in has expired. Open Claude Code to reconnect.")
-        req = request.Request("https://api.anthropic.com/api/oauth/usage", headers={
-            "Authorization": f"Bearer {token}",
-            "anthropic-beta": "oauth-2025-04-20",
-            "User-Agent": "TokenMaxxing/1.0", "Accept": "application/json",
-        })
-        with request.build_opener(_NoRedirect).open(req, timeout=12) as response:
-            payload = response.read(1024 * 1024)
-        return normalize_claude(json.loads(payload))
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0),
+                             0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        for attempt in range(5):
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError:
+                # Windows refuses while another process has the file open.
+                if attempt == 4:
+                    raise
+                time.sleep(0.1 * (attempt + 1))
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
+def _save_renewal(path, spent, renewal):
+    """Write a renewal back only over the sign-in it replaced. If the file
+    meanwhile holds another refresh token, someone signed in or renewed since,
+    and theirs is kept. Every other field, known or not, is left as it was."""
+    data, auth = _load_credentials(path)
+    if data is None or auth is None or auth.get("refreshToken") not in ("", spent):
+        return False
+    _write_credentials(path, {**data, "claudeAiOauth": {**auth, **renewal}})
+    return True
+
+
+def _request_renewal(auth):
+    """One refresh grant, shaped exactly as Claude Code sends it. Returns the
+    fields Claude Code updates; raises on any failure."""
+    scopes = auth.get("scopes")
+    scopes = [scope for scope in scopes if isinstance(scope, str) and scope] if isinstance(scopes, list) else []
+    client = auth.get("clientId")
+    body = json.dumps({
+        "grant_type": "refresh_token", "refresh_token": auth["refreshToken"],
+        "client_id": client if isinstance(client, str) and client else CLAUDE_CLIENT_ID,
+        "scope": " ".join(scopes or CLAUDE_SCOPES),
+    }).encode("utf-8")
+    req = request.Request(CLAUDE_TOKEN_URL, data=body, method="POST", headers={
+        "Content-Type": "application/json", "Accept": "application/json", "User-Agent": USER_AGENT})
+    with request.build_opener(_NoRedirect).open(req, timeout=RENEW_TIMEOUT) as response:
+        granted = json.loads(response.read(1024 * 1024))
+    if not isinstance(granted, dict):
+        raise ValueError("Malformed token response.")
+    access, refresh = granted.get("access_token"), granted.get("refresh_token")
+    lifetime = _number(granted.get("expires_in"))
+    if not isinstance(access, str) or not access or lifetime is None or lifetime <= 0:
+        raise ValueError("Malformed token response.")
+    now = int(time.time() * 1000)
+    renewal = {"accessToken": access,
+               # Without a new refresh token, the one just used stays valid.
+               "refreshToken": refresh if isinstance(refresh, str) and refresh else auth["refreshToken"],
+               "expiresAt": now + int(lifetime * 1000)}
+    lasts = _number(granted.get("refresh_token_expires_in"))
+    if lasts is not None and lasts > 0:
+        renewal["refreshTokenExpiresAt"] = now + int(lasts * 1000)
+    scope = granted.get("scope")
+    if isinstance(scope, str) and scope.split():
+        renewal["scopes"] = scope.split()
+    return renewal
+
+
+def _renew_claude(config, used, force=False):
+    """Return (sign-in, None) with a token worth sending, or (None, result)
+    saying why there is none. `used` is the access token already tried; a
+    different one on file means another process renewed it first."""
+    path = config / ".credentials.json"
+    with _renew_lock:
+        for attempt in range(LOCK_ATTEMPTS):
+            if attempt:
+                time.sleep(1)
+            with _RefreshLock(config) as held:
+                # Read again now: the file may have changed since it was read.
+                try:
+                    _, auth = _load_credentials(path)
+                except FileNotFoundError:
+                    auth = None
+                except (OSError, ValueError):
+                    continue
+                if not _usable(auth):
+                    return None, _provider("claude", CLAUDE_SOURCE, needs_sign_in=True, reason=SIGNED_OUT)
+                if auth["accessToken"] != used and not _expiring(auth):
+                    return auth, None
+                if not held:
+                    continue
+                refresh = auth.get("refreshToken")
+                if not isinstance(refresh, str) or not refresh:
+                    return None, _provider("claude", CLAUDE_SOURCE, needs_sign_in=True, reason=EXPIRED)
+                spent = _fingerprint(refresh)
+                renewal = _unsaved.get(spent)
+                if renewal is None or force or _expiring(renewal):
+                    current = {**auth, **(renewal or {})}
+                    if _fingerprint(current["refreshToken"]) in _refused:
+                        return None, _provider("claude", CLAUDE_SOURCE, needs_sign_in=True, reason=EXPIRED)
+                    try:
+                        renewal = _request_renewal(current)
+                    except error.HTTPError as exc:
+                        if exc.code in (400, 401, 403):
+                            # The provider refused this refresh token: only a
+                            # new sign-in can help, so it is not offered again.
+                            _refused.add(_fingerprint(current["refreshToken"]))
+                            return None, _provider("claude", CLAUDE_SOURCE, needs_sign_in=True, reason=EXPIRED)
+                        return None, _provider("claude", CLAUDE_SOURCE,
+                                               reason="Claude sign-in could not be renewed just now; retrying.")
+                    except (OSError, ValueError, TypeError, HTTPException):
+                        return None, _provider("claude", CLAUDE_SOURCE,
+                                               reason="Claude sign-in could not be renewed just now; retrying.")
+                    _unsaved[spent] = renewal
+                try:
+                    # Written back, or a newer sign-in is already on file:
+                    # either way this renewal no longer needs keeping.
+                    _save_renewal(path, refresh, renewal)
+                    _unsaved.pop(spent, None)
+                except (OSError, ValueError):
+                    # Kept in memory and written back on the next read.
+                    pass
+                return {**auth, **renewal}, None
+        return None, _provider("claude", CLAUDE_SOURCE,
+                               reason="Claude Code is renewing its sign-in; retrying shortly.")
+
+
+def _claude_usage(token):
+    req = request.Request(CLAUDE_USAGE_URL, headers={
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": "oauth-2025-04-20",
+        "User-Agent": USER_AGENT, "Accept": "application/json",
+    })
+    with request.build_opener(_NoRedirect).open(req, timeout=12) as response:
+        payload = response.read(1024 * 1024)
+    return normalize_claude(json.loads(payload))
+
+
+def _read_claude():
+    config = _claude_dir()
+    try:
+        _, auth = _load_credentials(config / ".credentials.json")
+        if not _usable(auth):
+            return _provider("claude", CLAUDE_SOURCE, needs_sign_in=True, reason=SIGNED_OUT)
+        refresh = auth.get("refreshToken")
+        unsaved = isinstance(refresh, str) and bool(refresh) and _fingerprint(refresh) in _unsaved
+        renewed = _expiring(auth) or unsaved
+        if renewed:
+            auth, problem = _renew_claude(config, auth["accessToken"])
+            if problem:
+                return problem
+        try:
+            return _claude_usage(auth["accessToken"])
+        except error.HTTPError as exc:
+            # A token can be withdrawn before its stated expiry: renew it once
+            # and ask again. A refusal right after renewing is a real sign-in
+            # problem, and so is a second one.
+            if exc.code != 401 or renewed or not auth.get("refreshToken"):
+                raise
+        auth, problem = _renew_claude(config, auth["accessToken"], force=True)
+        if problem:
+            return problem
+        return _claude_usage(auth["accessToken"])
     except FileNotFoundError:
-        return _provider("claude", CLAUDE_SOURCE, needs_sign_in=True,
-                         reason="No Claude Code subscription sign-in is available.")
+        return _provider("claude", CLAUDE_SOURCE, needs_sign_in=True, reason=SIGNED_OUT)
     except error.HTTPError as exc:
         if exc.code in (401, 403):
             return _provider("claude", CLAUDE_SOURCE, needs_sign_in=True,
@@ -340,6 +609,89 @@ def _read_claude():
     except (OSError, ValueError, TypeError):
         reason = "Claude usage data could not be read."
     return _provider("claude", CLAUDE_SOURCE, reason=reason)
+
+
+# Subscription names as each provider's own client stores them, in the words
+# its plan page uses. A name not listed here stays unknown rather than guessed.
+CLAUDE_PLANS = {"max": "Max", "pro": "Pro", "team": "Team", "enterprise": "Enterprise", "free": "Free"}
+CLAUDE_ORGANIZATION_PLANS = {"claude_max": "max", "claude_pro": "pro", "claude_team": "team",
+                             "claude_enterprise": "enterprise"}
+CODEX_PLANS = {
+    "free": "Free", "go": "Go", "plus": "Plus", "pro": "Pro", "prolite": "Pro Lite", "promax": "Pro Max",
+    "team": "Team", "business": "Business", "self_serve_business_prolite": "Business",
+    "self_serve_business_usage_based": "Business", "enterprise": "Enterprise", "ent26": "Enterprise",
+    "enterprise_cbp_automation": "Enterprise", "enterprise_cbp_usage_based": "Enterprise",
+    "edu": "Edu", "education": "Edu", "edu_plus": "Edu Plus", "edu_pro": "Edu Pro",
+}
+
+
+def _json_file(path):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _text(value):
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def claude_account():
+    """Plan and email from Claude Code's own files; nothing is requested."""
+    config = _claude_dir()
+    auth = _json_file(config / ".credentials.json").get("claudeAiOauth")
+    auth = auth if isinstance(auth, dict) else {}
+    # Claude Code's global config: a legacy .config.json wins where it exists.
+    legacy = config / ".config.json"
+    profile = legacy if legacy.is_file() else Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home()) / ".claude.json"
+    account = _json_file(profile).get("oauthAccount")
+    account = account if isinstance(account, dict) else {}
+    kind = _text(auth.get("subscriptionType")) or CLAUDE_ORGANIZATION_PLANS.get(account.get("organizationType"))
+    plan = CLAUDE_PLANS.get(kind.lower()) if kind else None
+    if plan == "Max":
+        # Max comes in sizes; the rate-limit tier says which, e.g. default_claude_max_20x.
+        for tier in (auth.get("rateLimitTier"), account.get("userRateLimitTier"),
+                     account.get("organizationRateLimitTier")):
+            size = re.search(r"max_(\d+)x", tier) if isinstance(tier, str) else None
+            if size:
+                plan = f"Max {size.group(1)}x"
+                break
+    if plan is None and _text(account.get("planDisplayName")):
+        plan = re.sub(r"^Claude\s+", "", _text(account["planDisplayName"])) or None
+    return {"plan": plan, "email": _text(account.get("emailAddress"))}
+
+
+def _jwt_claims(token):
+    """The claims of a JWT, read without verifying it: for display only."""
+    try:
+        part = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
+def codex_account():
+    """Plan and email from the sign-in Codex keeps; nothing is requested."""
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    tokens = _json_file(home / "auth.json").get("tokens")
+    claims = _jwt_claims(tokens.get("id_token")) if isinstance(tokens, dict) else {}
+    auth = claims.get("https://api.openai.com/auth")
+    kind = auth.get("chatgpt_plan_type") if isinstance(auth, dict) else None
+    return {"plan": CODEX_PLANS.get(kind.lower()) if isinstance(kind, str) else None,
+            "email": _text(claims.get("email"))}
+
+
+def _with_account(provider):
+    """Add the plan and email to a provider entry at the moment it is shown,
+    so they are never saved with the readings."""
+    reader = codex_account if provider.get("id") == "codex" else claude_account
+    try:
+        details = reader()
+    except Exception:
+        details = {"plan": None, "email": None}
+    return {**provider, **details}
 
 
 def _mark_stale(snapshot):
@@ -473,8 +825,8 @@ def get_provider_usage(force=False):
         # replacing the dashboard with a progress message.
         return peek_provider_usage() or {
             "fetched_at": None, "providers": [
-                _provider("codex", CODEX_SOURCE, reason="Reading quota\u2026"),
-                _provider("claude", CLAUDE_SOURCE, reason="Reading quota\u2026")]}
+                _with_account(_provider("codex", CODEX_SOURCE, reason="Reading quota\u2026")),
+                _with_account(_provider("claude", CLAUDE_SOURCE, reason="Reading quota\u2026"))]}
     try:
         results = queue.Queue()
 
@@ -497,7 +849,7 @@ def get_provider_usage(force=False):
             except queue.Empty:
                 break
         snapshot = {"fetched_at": time.time(), "providers": [
-            providers.get(provider_id) or _hold(provider_id, source, "Quota request timed out.")
+            _with_account(providers.get(provider_id) or _hold(provider_id, source, "Quota request timed out."))
             for provider_id, source, _ in readers]}
         with _lock:
             _cache, _cache_time = snapshot, time.monotonic()

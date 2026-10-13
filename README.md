@@ -35,7 +35,7 @@ Everything runs on your machine. No account, no server, no telemetry.
 
 ### Overview
 
-The whole cycle at a glance. What your usage is worth at API prices, split by provider, and the multiple against what you pay each month. Below it: how many hours of agent work each hour of yours drove, your time at the computer, and what your agents actually did.
+The last 7 or 30 days at a glance. What your usage is worth at API prices, split by provider, and the multiple against what you pay for it. Below it: how many hours of agent work each hour of yours drove, your time in your AI tools, day by day, and what your agents actually did. Hover over any figure to see exactly how it was worked out.
 
 </td>
 <td width="50%"><img src="docs/images/overview.png" alt="Overview tab"></td>
@@ -121,7 +121,7 @@ Every change merged into `main` ships as a numbered release (`v042`, `v043`, …
 | **Claude** | Claude Code, signed in with a Claude subscription | 5-hour and weekly limits and resets; session costs from local Claude Code logs |
 | **Codex** | The Codex client, signed in | 5-hour and weekly limits and resets; session costs from local Codex logs |
 
-If Claude or Codex ever needs you to sign in again, click **Reconnect** under Limits & resets. TOKENMAXXING opens the provider's own official sign-in page in your browser and picks up the connection as soon as you finish.
+If Claude or Codex ever needs you to sign in again, click **Reconnect** under Limits & resets. TOKENMAXXING opens the provider's own official sign-in page in your browser and picks up the connection as soon as you finish. You sign in once per account, not once per boot: Claude Code's sign-in lasts about eight hours, and TOKENMAXXING renews it the way Claude Code does, so it keeps working even if you only use the Claude desktop app.
 
 ### Run from source (Windows, macOS, Linux)
 
@@ -142,7 +142,9 @@ TOKENMAXXING is local-first by design.
 
 - **No telemetry, no accounts, no server.** The app talks only to the providers you already use, with the sign-ins you already have.
 - **Your conversations stay private.** Session costs are computed from token counts in local logs. No prompt text, transcript content or keystrokes are read, stored or sent.
-- **Credentials never leave the engine.** Provider access tokens stay in memory, and are never written to the cache or shown to the window.
+- **Credentials never leave the engine.** Provider access tokens stay in memory, and are never written to the cache or shown to the window. When Claude Code's sign-in is about to lapse, the engine renews it with Claude Code's own refresh request and writes it back to Claude Code's credentials file, in place and in the same format.
+- **Your history stays on this computer.** What the logs and Cursor's dashboard said is kept in a local SQLite file, so past days never change and any range opens instantly.
+- **Time in your AI tools is measured, not read.** On Windows, every 5 seconds TOKENMAXXING notes which program is in front and how long since you last touched the keyboard or mouse. The window title is used only to tell a Claude or ChatGPT browser tab, or a terminal running a coding agent, from anything else. Only the tool's name and the times are stored; titles are never stored or sent.
 - **SMS is opt-in and yours.** Twilio credentials are encrypted with your operating system's credential protection (DPAPI on Windows) and are never readable by the window after you save them.
 
 The local cache can contain your account email, chat names and usage figures, so treat `~/.cursor/token-hud/` as private.
@@ -216,7 +218,7 @@ To get texts, choose **Connect Twilio SMS** under Limits & resets and enter your
 
 | Path | Contents |
 |---|---|
-| `~/.cursor/token-hud/` (override with `TOKEN_HUD_DIR`) | `cycle-cache.json` (last Cursor snapshot), `cursor-activity.json` (the minutes Cursor logged requests in, last 40 days), `overview-facts.json` (what each Claude and Codex log of the last 40 days has said so far, so a restart reads only what they gained; safe to delete), `reset-schedule.json` (alert and plan-price preferences), `reset-buzzed.json` (alerts already sent) |
+| `~/.cursor/token-hud/` (override with `TOKEN_HUD_DIR`) | `tokenmaxxing.db` (the ledger: a SQLite file with every request, prompt, tool call and busy stretch read from your Claude Code and Codex logs, priced once when first read; the Cursor usage events and activity minutes the dashboard reported; and your time in your AI tools), `cycle-cache.json` (last Cursor snapshot), `reset-schedule.json` (alert and plan-price preferences), `reset-buzzed.json` (alerts already sent). An older `cursor-activity.json` is imported into the ledger once and no longer written. |
 | Windows: `%APPDATA%\Cursor\User\globalStorage\state.vscdb` | Cursor's local database, read-only |
 | macOS: `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | |
 | Linux: `~/.config/Cursor/User/globalStorage/state.vscdb` | |
@@ -231,6 +233,7 @@ Settings and credentials live outside the installation, so they survive updates.
 app/main.js            Electron window and engine bridge
 app/preload.js         The narrow IPC surface the window can use
 app/provider-link.js   Official browser sign-in and connection status
+app/focus.js           Time in your AI tools (foreground app and idle time, Windows)
 app/updates.js         In-app updates (rules in update-policy.js, download in update-download.js)
 app/whats-new.js       What's new card (notes from release-notes.js via release-notes-source.js)
 app/renderer/          The dashboard UI
@@ -239,7 +242,8 @@ cursor_usage.py        Cursor database and dashboard reads
 provider_usage.py      Codex and Claude quota reads
 session_usage.py       Session discovery and following the open chat
 session_cost.py        Per-request pricing from local logs
-overview_stats.py      Cycle totals, agent time and activity for Overview
+ledger.py              The local SQLite ledger and the background log reader
+overview_stats.py      Overview totals, agent time and activity, queried from the ledger
 reset_alerts.py        Reset alert timing
 ```
 

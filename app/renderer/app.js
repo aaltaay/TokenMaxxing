@@ -10,7 +10,8 @@ const POLL = {
   due: 5000,       // buzz check
   local: 2000,     // Cursor sqlite snapshot
   cycle: 240000,   // dashboard fetch
-  overview: 60000, // agent-log totals; unchanged logs are served from cache
+  overview: 60000, // agent-log totals, answered from the local ledger
+  build: 4000,     // while the one-time history build runs, so its strip moves
 };
 
 // Status colours. `maxxed` resolves to the provider's own hue at the call
@@ -39,12 +40,14 @@ const state = {
   autoActive: false,
   focus: null,
   view: 'overview',
-  overview: null,
+  // The last payload for each range, so switching paints at once while a
+  // fresh one is read, and which ranges have a read under way.
+  overviews: {},
+  overviewLoading: {},
   overviewError: null,
-  overviewFetching: false,
-  // How far a slow first read of the agent logs has got: {read, total} bytes.
+  // How far an older engine's slow first read has got: {read, total} bytes.
   overviewRead: null,
-  overviewRange: 'cycle',
+  overviewRange: 'month',
   priceEditor: false,
   // What the bell badge reflects besides alerts: a waiting update and the
   // engine's own status.
@@ -89,11 +92,12 @@ function relativeTime(epochSeconds) {
   return `${Math.round(secs / 3600)}h ago`;
 }
 
-/** Build an element. `attrs.class`, `attrs.text`, `attrs.vars` ({name: value}) are special. */
+/** Build an element. `attrs.class`, `attrs.text`, `attrs.vars` ({name: value})
+    and `attrs.explain` (how the figure was worked out, see explain()) are special. */
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
-    if (value === null || value === undefined || value === false) continue;
+    if (value === null || value === undefined || value === false || key === 'explain') continue;
     if (key === 'class') node.className = value;
     else if (key === 'text') node.textContent = value;
     else if (key === 'vars') for (const [k, v] of Object.entries(value)) node.style.setProperty(k, v);
@@ -101,6 +105,7 @@ function el(tag, attrs = {}, children = []) {
     else node.setAttribute(key, value);
   }
   for (const child of [].concat(children)) if (child) node.append(child);
+  if (attrs.explain) explain(node, attrs.explain);
   return node;
 }
 
@@ -136,6 +141,7 @@ const tooltip = {
   node: null,
   show(html, event) {
     if (!this.node) this.node = $('tooltip');
+    this.node.classList.remove('is-explain');
     this.node.replaceChildren(...[].concat(html));
     this.node.classList.add('is-on');
     const box = this.node.getBoundingClientRect();
@@ -153,6 +159,117 @@ function withTooltip(node, build) {
   node.addEventListener('mousemove', (e) => tooltip.show(build(), e));
   node.addEventListener('mouseleave', () => tooltip.hide());
   return node;
+}
+
+// Explanations: how a figure was worked out, on hover and on keyboard focus.
+// A native title waits about a second and never answers the keyboard, so the
+// whole app shares the one floating card above: it appears after a short
+// pause, sits beside the figure (or by the pointer on a large one) inside the
+// window, and the figure points at it with aria-describedby while it is up.
+// The text is "Title\nLine\nLine", with **bold** runs. Any element gets one
+// with explain(node, text) or el(tag, {explain: text}); listeners are
+// delegated, so a re-render needs nothing re-attached.
+
+const EXPLAIN_DELAY = 150;
+const NATIVE_FOCUS = new Set(['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA']);
+const explainer = { target: null, timer: null, pointer: null, installed: false };
+
+function explain(node, text) {
+  if (!text) return node;
+  node.setAttribute('data-explain', String(text));
+  // Reachable from the keyboard; a chart's bars set their own -1 (see rove).
+  if (!node.hasAttribute('tabindex') && !NATIVE_FOCUS.has(node.tagName)) node.setAttribute('tabindex', '0');
+  return node;
+}
+
+function explainContent(text) {
+  const [title, ...lines] = String(text).split('\n');
+  return [rich('b', 'tip-title', title), ...lines.filter(Boolean).map((line) => rich('p', null, line))];
+}
+
+/** Just below the target (above when there is no room), under the pointer
+    across a wide row, and by the pointer itself on a tall card or chart. */
+function placeExplain(node, rect, pointer) {
+  const margin = 8;
+  node.style.left = '0px';
+  node.style.top = '0px';
+  const box = node.getBoundingClientRect();
+  const tall = pointer && rect.height > 120;
+  const top = tall ? pointer.y - 14 : rect.top;
+  const bottom = tall ? pointer.y + 14 : rect.bottom;
+  let x = (pointer ? pointer.x : (rect.left + rect.right) / 2) - box.width / 2;
+  let y = bottom + 8;
+  if (y + box.height > window.innerHeight - margin) y = top - 8 - box.height;
+  x = Math.min(Math.max(margin, x), window.innerWidth - box.width - margin);
+  y = Math.min(Math.max(margin, y), window.innerHeight - box.height - margin);
+  node.style.left = `${Math.round(x)}px`;
+  node.style.top = `${Math.round(y)}px`;
+}
+
+function explainShow(target, pointer = null) {
+  const node = $('tooltip');
+  if (!node || !target?.getAttribute) return;
+  clearTimeout(explainer.timer);
+  if (explainer.target && explainer.target !== target) explainer.target.removeAttribute('aria-describedby');
+  explainer.target = target;
+  explainer.pointer = pointer;
+  // Filled at once, so a screen reader announcing the focus reads it too;
+  // drawn after the pause, or straight away when moving from one figure to the next.
+  node.replaceChildren(...explainContent(target.getAttribute('data-explain')));
+  target.setAttribute('aria-describedby', node.id || 'tooltip');
+  const draw = () => {
+    if (explainer.target !== target || !target.isConnected) return;
+    node.classList.add('is-on', 'is-explain');
+    placeExplain(node, target.getBoundingClientRect(), explainer.pointer);
+  };
+  if (node.classList.contains('is-explain') && node.classList.contains('is-on')) draw();
+  else explainer.timer = setTimeout(draw, EXPLAIN_DELAY);
+}
+
+function explainHide() {
+  clearTimeout(explainer.timer);
+  explainer.target?.removeAttribute('aria-describedby');
+  explainer.target = null;
+  const node = $('tooltip');
+  if (node?.classList.contains('is-explain')) node.classList.remove('is-on', 'is-explain');
+}
+
+function installExplain() {
+  if (explainer.installed) return;
+  explainer.installed = true;
+  const targetOf = (event) => event.target?.closest?.('[data-explain]') || null;
+  document.addEventListener('mouseover', (event) => {
+    const target = targetOf(event);
+    if (target && target !== explainer.target) explainShow(target, { x: event.clientX, y: event.clientY });
+    else if (!target && explainer.target && explainer.target !== document.activeElement) explainHide();
+  });
+  document.addEventListener('focusin', (event) => {
+    const target = targetOf(event);
+    if (target && target !== explainer.target) explainShow(target);
+  });
+  document.addEventListener('focusout', (event) => {
+    if (event.target === explainer.target) explainHide();
+  });
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') explainHide(); });
+  // A fixed card would drift from its figure as the page scrolls.
+  document.addEventListener('scroll', () => explainHide(), true);
+  window.addEventListener('blur', () => explainHide());
+}
+
+/** Arrow keys step through a chart's bars, so a chart is one stop for Tab. */
+function rove(container, items, columns = 1) {
+  items.forEach((item, i) => item.setAttribute('tabindex', i === 0 ? '0' : '-1'));
+  container.addEventListener('keydown', (event) => {
+    const i = items.indexOf(event.target);
+    const step = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: columns, ArrowUp: -columns, Home: -i, End: items.length - 1 - i }[event.key];
+    if (i < 0 || step === undefined) return;
+    event.preventDefault();
+    const next = items[Math.min(items.length - 1, Math.max(0, i + step))];
+    items[i].setAttribute('tabindex', '-1');
+    next.setAttribute('tabindex', '0');
+    next.focus();
+  });
+  return container;
 }
 
 // ── identity ─────────────────────────────────────────────────────────────
@@ -1439,12 +1556,74 @@ function renderResets() {
 }
 
 // ── overview ──────────────────────────────────────────────────────────────
-// The whole cycle at a glance: what the usage is worth at API prices against
-// what the plans cost, and how much agent work your own hours drove.
+// The last 7 or 30 days, read top-down in a narrow window: what the usage is
+// worth at API prices against what the plans cost, your own time in AI tools
+// against the agents' time, the days one by one, then what the agents did.
+// Every figure says how it was worked out when you hover or focus it.
 
 const CURSOR_PLAN_PRICE = { ultra: 200, 'pro+': 60, pro: 20, business: 40, teams: 40 };
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const OV_HUE = { you: 'var(--ov-you)', cursor: 'var(--ov-cursor)', claude: 'var(--ov-claude)', codex: 'var(--ov-codex)' };
+// The agents, in the order a day's column stacks them from the bottom.
+const OV_AGENTS = [['claude', 'Claude Code'], ['codex', 'Codex'], ['cursor', 'Cursor']];
+
+// The apps whose window in front counts as time in your AI tools. The three
+// providers keep their hues; ChatGPT takes a lighter tint of Codex's green
+// (same maker), and the editors and the terminal take the palette's spare
+// blue, violet and neutral grey.
+const FOCUS_APPS = [
+  ['claude', 'Claude', 'var(--ov-claude)', 'The Claude app, or claude.ai in a browser.'],
+  ['chatgpt', 'ChatGPT', 'var(--ov-chatgpt)', 'The ChatGPT app, or chatgpt.com in a browser.'],
+  ['codex', 'Codex', 'var(--ov-codex)', 'The Codex app.'],
+  ['cursor', 'Cursor', 'var(--ov-cursor)', 'The Cursor editor.'],
+  ['vscode', 'VS Code', 'var(--ov-vscode)', 'VS Code.'],
+  ['windsurf', 'Windsurf', 'var(--ov-windsurf)', 'The Windsurf editor.'],
+  ['terminal', 'Terminal', 'var(--ov-terminal)', 'A terminal running a command-line agent: Claude Code, Codex, Gemini or aider.'],
+];
+
+function focusApp(id, label) {
+  const rank = FOCUS_APPS.findIndex(([key]) => key === id);
+  return rank >= 0 ? { id, label: FOCUS_APPS[rank][1], hue: FOCUS_APPS[rank][2], what: FOCUS_APPS[rank][3], rank }
+    : { id, label: label || String(id), hue: 'var(--ov-other)', what: '', rank: FOCUS_APPS.length };
+}
+
+// How each figure is worked out, word for word as the engine does it.
+const EXPLAIN = {
+  value: 'Each Claude Code and Codex request\'s tokens (input, output, cache read, cache write) are priced at the model\'s published API rates when the request is first read, then stored, so history keeps the price it had. Cursor\'s value is the per-request charge Cursor\'s own dashboard reports.',
+  unpriced: 'Requests from models with no published price count as $0 and are counted separately.',
+  tokens: 'Input, output, cache read and cache write tokens, added up across Cursor, Claude Code and Codex.',
+  agent: 'Each session log\'s activity merged into busy stretches: moments less than 5 minutes apart join, and a log quiet for more than 5 minutes was idle, not working. Subagents count separately, from their own logs. Cursor: every minute its dashboard logged a request, merged the same way.',
+  wall: 'The union of every agent\'s busy stretches: the clock time with at least one agent working, so agents running side by side count once.',
+  parallel: 'Busy agent time ÷ that real time: how many agents were working at once, on average, while any was.',
+  peak: 'The most busy stretches overlapping at one moment. Each session, subagent and Cursor counts as one.',
+  think: 'The gap between an agent\'s reply and your next prompt, up to 15 minutes each, from your Claude Code and Codex logs.',
+  estimate: 'the messages you typed into Claude Code and Codex (not tool results, hooks, slash commands or task notifications) and the minutes Cursor\'s agent answered you in the editor, grouped into sittings where they\'re less than 30 minutes apart, plus 5 minutes for reading the last reply.',
+  prompts: 'Messages you typed into Claude Code and Codex: not tool results, hooks, slash commands or task notifications.',
+  tools: 'Every tool an agent called: Claude Code\'s tool_use blocks and Codex\'s function calls, grouped by kind.',
+  heat: 'Agent minutes in each hour of the week, added up over these days: every agent\'s busy stretches cut at the hour, so three agents busy through one hour count 180. Brighter is busier.',
+  pending: 'The one-time history build hasn\'t reached this day yet. It fills in once, then stays put.',
+  soFar: 'Your history is still being built, so this grows as older days are read. Once the build finishes, past days never change.',
+};
+
+const TOOL_KINDS = {
+  Shell: 'Commands run in a shell: Bash, PowerShell, exec.',
+  Edit: 'Changes to existing files: Edit, MultiEdit, notebook edits, apply_patch.',
+  Read: 'Files read.',
+  Write: 'Files written whole.',
+  Search: 'Searches: Grep, Glob, web search, tool search.',
+  Browser: 'Browser and computer use: navigating, clicking, reading pages.',
+  'Web fetch': 'Web pages fetched.',
+  Subagents: 'Work handed to other agents: Agent, Task, workflows, messages to agents.',
+};
+
+/** What counts as time in your AI tools, from the tracker's own settings. */
+function focusBody(o) {
+  const idle = Math.round((o.focus?.idle_cutoff_s || 300) / 60);
+  return 'every 5 seconds TOKENMAXXING notes which window is in front, and counts the time when it is an AI tool '
+    + '(the Claude, ChatGPT or Codex app, claude.ai or chatgpt.com in a browser, Cursor, VS Code, Windsurf, or a terminal running a command-line agent) '
+    + `and you've touched the keyboard or mouse in the last ${idle} minutes. Agents working while you're elsewhere don't count. `
+    + 'A window\'s title is read only to tell these apart, then dropped.';
+}
 
 const dollars = (cents) => `$${Math.round(cents / 100).toLocaleString('en-US')}`;
 /** Days and hours past a day, hours and minutes under it: "6 days 22 h", "14 h 18 min". */
@@ -1462,10 +1641,33 @@ const spanBig = (hours) => spanParts(hours).filter(([n], i, all) => n || all.len
   .flatMap(([n, u], i) => [i ? ` ${n}` : String(n), el('small', { text: ` ${u}` })]);
 const hoursShort = (h) => (h >= 1 ? `${Math.round(h)}h` : `${Math.round(h * 60)}m`);
 const tokenSum = (t) => ['input', 'output', 'cache_read', 'cache_write'].reduce((s, k) => s + (t?.[k] || 0), 0);
+const count = (n) => (known(n) ? n : 0).toLocaleString('en-US');
+const plural = (n, word) => `${count(n)} ${word}${n === 1 ? '' : 's'}`;
+const bold = (text) => el('b', { text });
+const sizeText = (bytes) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`);
+const dateOf = (date, opts = { weekday: 'short', month: 'short', day: 'numeric' }) => new Date(`${date}T12:00`).toLocaleDateString([], opts);
+const shortDate = (epoch) => new Date(epoch * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
+const whenText = (epoch) => new Date(epoch * 1000).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+const hourName = (h) => `${h % 12 || 12} ${h < 12 ? 'am' : 'pm'}`;
+const dayStart = (date) => new Date(`${date}T00:00`).getTime() / 1000;
+function dayEnd(date) {
+  const end = new Date(`${date}T00:00`);
+  end.setDate(end.getDate() + 1);
+  return end.getTime() / 1000;
+}
+function isoDate(at = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
+}
 
-// The ranges the Overview can show, as the days before today they reach back.
-const OV_RANGES = [['day', 'Today', 0], ['week', '7 days', 6], ['month', '30 days', 29], ['cycle', 'This cycle', null]];
-const rangeOf = (id) => OV_RANGES.find(([key]) => key === id) || OV_RANGES[3];
+// The ranges the Overview shows, as days counted back from today inclusive.
+// A saved choice of the retired Today or This cycle opens on 30 days.
+const OV_RANGES = [['week', '7 days', 7], ['month', '30 days', 30]];
+const rangeOf = (id) => OV_RANGES.find(([key]) => key === id) || OV_RANGES[1];
+const savedRange = (value) => rangeOf(value)[0];
+/** The share of a month of subscriptions a range is weighed against: 7 days
+    against 7/30 of each monthly price, so like is compared with like. */
+const monthShare = (id) => rangeOf(id)[2] / 30;
 
 /** Local midnight `back` days ago, so a range's start holds still all day. */
 function midnight(back) {
@@ -1475,55 +1677,74 @@ function midnight(back) {
   return start.getTime() / 1000;
 }
 
-function overviewSince() {
-  const back = rangeOf(state.overviewRange)[2];
-  if (back !== null) return midnight(back);
-  const start = state.cycle?.cycle_start ? Date.parse(state.cycle.cycle_start) / 1000 : null;
-  return known(start) ? start : midnight(29);
+const rangeSince = (id = state.overviewRange) => midnight(rangeOf(id)[2] - 1);
+
+/** The payload on screen: the chosen range's last one, or until that first
+    arrives the other range's, dimmed. A switch never blanks the page. */
+function shownOverview() {
+  return state.overviews[state.overviewRange] || Object.values(state.overviews).find(Boolean) || null;
 }
 
-async function refreshOverview() {
-  if (state.overviewFetching) return;
-  state.overviewFetching = true;
-  const since = overviewSince();
-  const range = state.overviewRange;
-  // Nearly every read takes well under a second; a first read of every log
-  // takes a minute or two, and the empty Overview says how far it has got.
-  const watch = setInterval(watchOverviewRead, 1000);
+const overviewBusy = () => Object.values(state.overviewLoading).some(Boolean);
+
+async function refreshOverview(range = state.overviewRange) {
+  if (state.overviewLoading[range]) return;
+  state.overviewLoading[range] = true;
+  const since = rangeSince(range);
+  // An older engine's first read of every log takes a minute or two; the
+  // empty Overview says how far it has got.
+  const watch = shownOverview() ? null : setInterval(watchOverviewRead, 1000);
   try {
-    state.overview = { ...await window.hud.call('overview', { since }), range };
-    state.overviewError = null;
+    const reply = await window.hud.call('overview', { since });
+    if (!reply || typeof reply !== 'object') throw new Error('The engine sent no Overview.');
+    state.overviews[range] = { ...reply, range };
+    if (range === state.overviewRange) state.overviewError = null;
   } catch (err) {
-    state.overviewError = engineMessage(err);
+    if (range === state.overviewRange) state.overviewError = engineMessage(err);
   } finally {
     clearInterval(watch);
-    state.overviewFetching = false;
+    state.overviewLoading[range] = false;
     state.overviewRead = null;
-    renderOverview();
-    // The range changed while the logs were being read.
-    if (since !== overviewSince()) refreshOverview();
+    if (range === state.overviewRange) {
+      renderOverview();
+      // Midnight moved the range's start while it was read.
+      if (since !== rangeSince(range)) refreshOverview(range);
+      else if (building(state.overviews[range])) followBuild();
+    }
   }
 }
 
+// While the one-time history build runs, ask again every few seconds so its
+// strip moves; the ledger answers in milliseconds.
+let buildTimer = null;
+function followBuild() {
+  if (buildTimer) return;
+  buildTimer = setTimeout(() => { buildTimer = null; refreshOverview(); }, POLL.build);
+}
+
+/** Read the range not on screen once, so even the first switch is instant. */
+function prefetchOverview() {
+  for (const [id] of OV_RANGES) if (!state.overviews[id]) refreshOverview(id);
+}
+
 async function watchOverviewRead() {
-  if (state.overview) return;
+  if (shownOverview()) return;
   try {
     state.overviewRead = await window.hud.call('overview_progress');
   } catch {
     return; // Only the progress line goes missing; the read itself carries on.
   }
-  if (state.overviewFetching && !state.overview) renderOverview();
+  if (!shownOverview()) renderOverview();
 }
 
 /** Until the first figures arrive: how far the read has got, or why it failed. */
 function overviewReading() {
-  if (state.overviewError && !state.overviewFetching) return el('div', { class: 'ov-loading', text: state.overviewError });
+  if (state.overviewError && !overviewBusy()) return el('div', { class: 'ov-loading', text: state.overviewError });
   const read = state.overviewRead;
   const total = read?.total > 0 ? read.total : null;
-  const size = total >= 1e9 ? `${(total / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(total / 1e6))} MB`;
   return el('div', { class: 'ov-loading' }, [
     el('div', { text: 'Reading your agent logs…' }),
-    total ? el('div', { class: 'ov-muted ov-gap', text: `${Math.min(99, Math.floor((100 * read.read) / total))}% of ${size}. `
+    total ? el('div', { class: 'ov-muted ov-gap', text: `${Math.min(99, Math.floor((100 * read.read) / total))}% of ${sizeText(total)}. `
       + 'The first read takes a minute or two; after that, seconds.' }) : null,
   ]);
 }
@@ -1531,23 +1752,117 @@ function overviewReading() {
 function setOverviewRange(id) {
   if (id === state.overviewRange) return;
   state.overviewRange = id;
+  state.overviewError = null;
   try { localStorage.setItem('overviewRange', id); } catch { /* Remembering the range is a convenience. */ }
   renderOverview();
-  refreshOverview();
+  refreshOverview(id);
 }
 
-/** Cursor's value and tokens over the shown range, from its dashboard: the
-    cycle total, or its total for a shorter range from the same midnight.
-    Until a refresh brings the range (or after midnight moves it), none. */
+// ── history build ──
+// The engine reads every old log once into its ledger. Until it is done, the
+// days it hasn't reached are drawn as not read yet rather than as bars that
+// grow, and totals say "so far". After that, nothing about a past day moves.
+
+const building = (o) => Boolean(o?.backfill) && !o.backfill.done;
+
+/** A day the history build has yet to reach. */
+function dayPending(o, date) {
+  if (!building(o)) return false;
+  const from = o.backfill.complete_from;
+  return !known(from) || dayStart(date) < from;
+}
+
+const soFarTag = (o) => (building(o) ? el('span', { class: 'ov-sofar', text: 'so far', explain: `So far\n${EXPLAIN.soFar}` }) : null);
+
+function buildParts(b) {
+  const total = b.total_bytes > 0 ? b.total_bytes : null;
+  // Never 100% while it still runs.
+  const percent = total ? Math.min(99, Math.max(0, Math.floor((100 * (b.read_bytes || 0)) / total))) : 0;
+  return { share: percent / 100, text: total ? `Building your history: ${percent}% of ${sizeText(total)}. One time only.`
+    : 'Building your history. One time only.' };
+}
+
+function overviewBuild(o) {
+  if (!building(o)) return null;
+  const b = o.backfill;
+  const { share, text } = buildParts(b);
+  const reached = known(b.complete_from) ? ` Days from ${shortDate(b.complete_from)} on are complete; earlier ones are hatched and say "not read yet".` : '';
+  return el('div', { class: 'ov-build', role: 'status', explain: 'Building your history\n'
+    + `TOKENMAXXING is reading your Claude Code and Codex logs once into a database on this computer.${reached}`
+    + `\nTotals say "so far" until it finishes. After that, past days never change, and every switch is instant.` }, [
+    el('span', { class: 'ov-build-t', text }),
+    el('span', { class: 'ov-build-bar' }, [el('i', { vars: { '--w': `${share * 100}%` } })]),
+  ]);
+}
+
+// ── your time ──
+
+/** Your time on each day of the range: measured where the focus tracker was
+    running, the prompt-based estimate before it started, and drawn as not
+    read yet where the history build hasn't reached (its partial estimate
+    still counts toward the "so far" total). */
+function yourDays(o) {
+  const tracked = known(o.focus?.tracked_since) ? o.focus.tracked_since : null;
+  const measured = new Map((o.focus?.days || []).map((d) => [d.date, d]));
+  const estimate = new Map((o.desk_days || []).map((d) => [d.date, d.hours || 0]));
+  const dates = (o.days?.length ? o.days : o.desk_days?.length ? o.desk_days : o.focus?.days || []).map((d) => d.date);
+  return dates.map((date) => {
+    if (tracked !== null && dayEnd(date) > tracked) {
+      const d = measured.get(date);
+      const apps = d?.apps || {};
+      const hours = known(d?.hours) ? d.hours : Object.values(apps).reduce((s, h) => s + (h || 0), 0);
+      return { date, kind: 'measured', hours, apps, began: dayStart(date) < tracked ? tracked : null };
+    }
+    return { date, kind: dayPending(o, date) ? 'pending' : 'estimated', hours: estimate.get(date) || 0, apps: {} };
+  });
+}
+
+function yourTime(o) {
+  const days = yourDays(o);
+  const of = (...kinds) => days.filter((d) => kinds.includes(d.kind));
+  const measuredDays = of('measured').length;
+  const measured = !measuredDays ? 0 : known(o.focus?.hours) ? o.focus.hours : of('measured').reduce((s, d) => s + d.hours, 0);
+  const estimated = of('estimated', 'pending').reduce((s, d) => s + d.hours, 0);
+  return {
+    days, measured, estimated, total: measured + estimated, measuredDays,
+    estimatedDays: of('estimated').length, pendingDays: of('pending').length,
+    since: measuredDays ? o.focus.tracked_since : null,
+  };
+}
+
+function yourBasis(t) {
+  if (!t.measuredDays) return 'estimated from your prompts';
+  const rest = t.estimatedDays + t.pendingDays;
+  return rest ? `measured ${t.measuredDays} d, estimated ${rest} d` : 'measured';
+}
+
+function yourExplain(o, t) {
+  const lines = [];
+  if (t.measuredDays) lines.push(`Measured since ${whenText(t.since)}, ${spanText(t.measured)}: ${focusBody(o)}`);
+  if (t.estimatedDays + t.pendingDays) {
+    lines.push(`${t.measuredDays ? `Estimated for the ${plural(t.estimatedDays + t.pendingDays, 'day')} before that` : 'Estimated from your prompts'}, `
+      + `${spanText(t.estimated)}: ${EXPLAIN.estimate}`);
+  }
+  return lines.join('\n');
+}
+
+// ── value ──
+
+/** Cursor's value and tokens over the shown range. The local ledger holds
+    every Cursor request with the charge its dashboard reported, so once it
+    covers the whole range it is the steadier source; until then, the
+    dashboard's own total for the range from the same midnight. */
 function cursorRow(o) {
   const cycle = state.cycle;
-  if (!cycle || !known(cycle.total_spend_cents)) return null;
-  const price = CURSOR_PLAN_PRICE[String(cycle.plan || '').toLowerCase()] ?? null;
-  const total = o.range === 'cycle'
-    ? { cents: cycle.total_spend_cents, input: cycle.agg_input, output: cycle.agg_output, cache_read: cycle.agg_cache_read, cache_write: cycle.agg_cache_write }
-    : cycle.range_totals?.[o.range];
-  if (!total || !known(total.cents) || (o.range !== 'cycle' && Math.abs(total.start - o.since) > 60)) return null;
-  return { id: 'cursor', label: 'Cursor', cents: total.cents, price,
+  const plan = cycle?.plan && cycle.plan !== 'Unknown' ? cycle.plan : null;
+  const price = cycle ? CURSOR_PLAN_PRICE[String(cycle.plan || '').toLowerCase()] ?? null : null;
+  if (o.cursor?.complete && known(o.cursor.cents)) {
+    return { id: 'cursor', label: 'Cursor', cents: o.cursor.cents, price, plan, tokens: o.cursor.tokens || {},
+      requests: o.cursor.requests, source: 'ledger' };
+  }
+  const total = cycle?.range_totals?.[o.range];
+  if (!total || !known(total.cents) || Math.abs(total.start - o.since) > 60) return null;
+  return { id: 'cursor', label: 'Cursor', cents: total.cents, price, plan, source: 'dashboard',
     tokens: { input: total.input, output: total.output, cache_read: total.cache_read, cache_write: total.cache_write } };
 }
 
@@ -1565,64 +1880,78 @@ function overviewProviders(o) {
   return rows;
 }
 
+const unpricedRequests = (o) => ['claude', 'codex'].reduce((s, id) => s + (o.providers?.[id]?.unpriced_requests || 0), 0);
+
+function providerExplain(o, r, mult) {
+  const t = r.tokens || {};
+  const days = rangeOf(o.range)[2];
+  const lines = [`${r.label} · ${money(r.cents)} at API prices`];
+  if (r.id !== 'cursor') lines.push('Each request\'s tokens priced at the model\'s published API rates when it was first read, then stored, so history keeps the price it had.');
+  else if (r.source === 'ledger') lines.push(`The charge Cursor's own dashboard reported for each of its ${count(r.requests)} requests in these days, kept on this computer.`);
+  else lines.push('Cursor\'s own dashboard total for these days: the per-request charges it reports.');
+  lines.push(`${compact(tokenSum(t))} tokens: ${compact(t.input || 0)} input, ${compact(t.output || 0)} output, `
+    + `${compact(t.cache_read || 0)} cache read, ${compact(t.cache_write || 0)} cache write.`);
+  if (known(mult)) {
+    lines.push(`${mult.toFixed(1)}× ${days === 30 ? 'its' : `${days}/30 of its`} $${r.price}/mo plan${r.id === 'cursor' && r.plan ? ` (${r.plan}, read from your account)` : ''}. The bar is its share of all the value.`);
+  }
+  const unpriced = o.providers?.[r.id]?.unpriced_requests;
+  if (unpriced) lines.push(`${plural(unpriced, 'request')} used a model with no published price and count as $0.`);
+  return lines.join('\n');
+}
+
 function overviewHero(o, rows) {
   const total = rows.reduce((s, r) => s + r.cents, 0);
   const tokens = rows.reduce((s, r) => s + tokenSum(r.tokens), 0);
   const roundCents = Math.round(total);
-  const whole = Math.floor(roundCents / 100);
-  const cycle = state.cycle;
-  const start = o.since;
-  const end = cycle?.cycle_end ? Date.parse(cycle.cycle_end) / 1000 : null;
-  const dateText = (epoch) => new Date(epoch * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
-  const [range, rangeLabel, back] = rangeOf(o.range);
-  // A shorter range is weighed against its share of a month of subscriptions.
-  const share = range === 'cycle' ? 1 : (back + 1) / 30;
-  const paid = rows.reduce((s, r) => s + (known(r.price) ? r.price : 0), 0) * share;
+  const [range, rangeLabel, days] = rangeOf(o.range);
+  const share = monthShare(range);
+  const priced = rows.filter((r) => known(r.price));
+  const paid = priced.reduce((s, r) => s + r.price, 0) * share;
   const paidText = `$${Math.round(paid).toLocaleString('en-US')}`;
+  const multiple = paid > 0 ? total / 100 / paid : null;
+  const unpriced = unpricedRequests(o);
+  const plans = priced.map((r) => `${r.label} $${r.price}/mo`).join(' + ') || 'no prices set';
+  const weighed = days === 30 ? 'Thirty days are weighed against one month of each plan.'
+    : `${rangeLabel} are weighed against ${days}/30 of each monthly price, so like is compared with like.`;
+  const ownPlans = rows.some((r) => r.id === 'cursor') ? 'Cursor\'s plan is read from your account; Claude\'s and Codex\'s' : 'Claude\'s and Codex\'s';
 
-  const split = el('div', { class: 'ov-split' }, rows.map((r) => el('div', { class: 'ov-pc', vars: { '--c': PROVIDER_HUE[r.id], '--pcol': OV_HUE[r.id] } }, [
-    el('div', { class: 'ov-pc-h' }, [el('span', { class: 'ov-mk' }, [icon(PROVIDER_GLYPH[r.id], 12)]), r.label]),
-    el('div', { class: 'ov-pc-v', text: dollars(r.cents) }),
-    el('div', { class: 'ov-pc-t' }, [el('b', { text: compact(tokenSum(r.tokens)) }), ' tokens',
-      known(r.price) && r.price > 0 ? ` · ${(r.cents / 100 / (r.price * share)).toFixed(1)}×` : null]),
-    el('div', { class: 'ov-bar' }, [el('i', { vars: { '--w': `${total ? (r.cents / total) * 100 : 0}%` } })]),
-  ])));
-
-  const eyebrow = range === 'cycle'
-    ? (known(end) ? `This cycle · ${dateText(start)} – ${dateText(end)}` : `Since ${dateText(start)}`)
-    : range === 'day' ? `Today · ${new Date().toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}`
-      : `Last ${rangeLabel} · ${dateText(start)} – ${dateText(Date.now() / 1000)}`;
-  const paidLabel = range === 'cycle' ? ['for ', el('b', { text: `${paidText}/mo` }), ' in subscriptions']
-    : ['for ', el('b', { text: paidText }), range === 'day' ? ' of subscriptions today' : ` of subscriptions over ${rangeLabel}`];
-
-  let progress = null;
-  if (range === 'cycle' && known(end) && end > start) {
-    const now = Date.now() / 1000;
-    const frac = Math.min(1, Math.max(0, (now - start) / (end - start)));
-    const day = Math.max(1, Math.ceil((now - start) / 86400));
-    const days = Math.round((end - start) / 86400);
-    progress = el('div', { class: 'ov-cycle' }, [
-      el('span', {}, ['Day ', el('b', { text: String(Math.min(day, days)) }), ` of ${days}`]),
-      el('div', { class: 'ov-track' }, [el('i', { vars: { '--w': `${frac * 100}%` } })]),
-      frac > 0.05 && frac < 1 ? el('span', {}, ['On track for ', el('b', { class: 'ov-hi', text: dollars(total / frac) })]) : null,
+  const split = el('div', { class: 'ov-split' }, rows.map((r) => {
+    const mult = known(r.price) && r.price > 0 ? r.cents / 100 / (r.price * share) : null;
+    return el('div', { class: 'ov-pc', vars: { '--c': PROVIDER_HUE[r.id], '--pcol': OV_HUE[r.id] }, explain: providerExplain(o, r, mult) }, [
+      el('div', { class: 'ov-pc-h' }, [el('span', { class: 'ov-mk' }, [icon(PROVIDER_GLYPH[r.id], 12)]), r.label]),
+      el('div', { class: 'ov-pc-v', text: dollars(r.cents) }),
+      el('div', { class: 'ov-pc-t' }, [bold(compact(tokenSum(r.tokens))), ' tokens', known(mult) ? ` · ${mult.toFixed(1)}×` : null]),
+      el('div', { class: 'ov-bar' }, [el('i', { vars: { '--w': `${total ? (r.cents / total) * 100 : 0}%` } })]),
     ]);
-  }
+  }));
 
   return el('div', { class: 'card ov-hero' }, [
-    el('div', { class: 'ov-eyebrow', text: eyebrow }),
+    el('div', { class: 'ov-eyebrow' }, [
+      el('span', { text: `Last ${rangeLabel} · ${shortDate(o.since)} – ${shortDate(Date.now() / 1000)}`,
+        explain: `Last ${rangeLabel}\nToday and the ${days - 1} days before it, from local midnight on ${dateOf(isoDate(new Date(o.since * 1000)))}.` }),
+      soFarTag(o),
+    ]),
     el('div', { class: 'ov-hero-row' }, [
-      el('div', {}, [
-        el('div', { class: 'ov-big' }, [`$${whole.toLocaleString('en-US')}`, el('small', { text: `.${String(roundCents % 100).padStart(2, '0')}` })]),
-        el('div', { class: 'ov-lede' }, ['of AI at API prices, across ', el('b', { text: `${compact(tokens)} tokens` })]),
+      el('div', { class: 'ov-value', explain: `Value at API prices · ${money(total)}\n${EXPLAIN.value}\n${EXPLAIN.unpriced}`
+        + `${unpriced ? ` ${plural(unpriced, 'request')} here.` : ''}\nTokens, ${count(tokens)}: ${EXPLAIN.tokens}` }, [
+        el('div', { class: 'ov-big' }, [`$${Math.floor(roundCents / 100).toLocaleString('en-US')}`, el('small', { text: `.${String(roundCents % 100).padStart(2, '0')}` })]),
+        el('div', { class: 'ov-lede' }, ['of AI at API prices, across ', bold(`${compact(tokens)} tokens`)]),
       ]),
-      el('button', { class: 'ov-roi', type: 'button', title: 'Edit plan prices', onclick: () => { state.priceEditor = !state.priceEditor; renderOverview(); } }, [
-        el('div', { class: 'ov-x', text: paid > 0 ? `${(total / 100 / paid).toFixed(1)}×` : '—' }),
-        el('div', { class: 'ov-l' }, paidLabel),
+      el('button', {
+        class: 'ov-roi', type: 'button', 'aria-expanded': String(state.priceEditor),
+        explain: `${known(multiple) ? `${multiple.toFixed(1)}× ` : ''}your subscriptions\n${money(total, 0)} of value ÷ ${paidText} of plans`
+          + `${known(multiple) ? ` = ${multiple.toFixed(1)}×` : ''}.\nPlans: ${plans}. ${ownPlans} prices are yours to set: click to edit.\n${weighed}`,
+        onclick: () => { state.priceEditor = !state.priceEditor; renderOverview(); },
+      }, [
+        el('div', { class: 'ov-x', text: known(multiple) ? `${multiple.toFixed(1)}×` : '—' }),
+        el('div', { class: 'ov-l' }, days === 30 ? ['for ', bold(`${paidText}/mo`), ' in subscriptions']
+          : ['for ', bold(paidText), ` of subscriptions over ${rangeLabel}`]),
       ]),
     ]),
     state.priceEditor ? priceEditor(o) : null,
     split,
-    progress,
+    unpriced ? el('div', { class: 'ov-muted ov-gap', text: `${plural(unpriced, 'request')} used a model with no published price and count as $0.`,
+      explain: `Unpriced requests · ${count(unpriced)}\nClaude Code and Codex requests from models with no published API price. Their tokens are counted; their value is $0 rather than a guess.` }) : null,
   ]);
 }
 
@@ -1637,7 +1966,8 @@ function priceEditor(o) {
       if (Number.isFinite(value) && value >= 0) prices[id] = value;
     }
     try {
-      state.overview.plan_prices = await window.hud.call('set_plan_prices', { prices });
+      const saved = await window.hud.call('set_plan_prices', { prices });
+      for (const payload of Object.values(state.overviews)) if (payload) payload.plan_prices = saved;
     } catch (err) {
       banner(engineMessage(err));
     }
@@ -1651,281 +1981,400 @@ function priceEditor(o) {
   ]);
 }
 
-function overviewTime(o) {
+// ── your time vs agent time ──
+
+function agentHours(o) {
   const claude = o.providers?.claude?.agent_hours || 0;
   const codex = o.providers?.codex?.agent_hours || 0;
   const cursor = o.cursor_agent_hours || 0;
-  const agent = claude + codex + cursor;
-  const human = o.human_hours || 0;
-  const most = Math.max(human, claude, codex, cursor, 0.01);
-  const lane = (label, h, color) => el('div', { class: 'ov-lane' }, [
-    el('div', { class: 'ov-lt' }, [el('span', { text: label }), el('b', { text: spanText(h) })]),
+  return { claude, codex, cursor, total: claude + codex + cursor };
+}
+
+function overviewTime(o, you) {
+  const a = agentHours(o);
+  const most = Math.max(you.total, a.claude, a.codex, a.cursor, 0.01);
+  const lane = (label, h, color, text) => el('div', { class: 'ov-lane', explain: text }, [
+    el('div', { class: 'ov-lt' }, [el('span', { text: label }), bold(spanText(h))]),
     el('div', { class: 'ov-lb' }, [el('i', { vars: { '--w': `${(h / most) * 100}%`, '--c': color } })]),
   ]);
   const peak = o.peak?.agents || 0;
-  const peakAt = o.peak?.at ? new Date(o.peak.at * 1000).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
-  const parallel = o.wall_hours > 0 ? agent / o.wall_hours : null;
+  const wall = o.wall_hours || 0;
+  const parallel = wall > 0 ? a.total / wall : null;
+  const lever = you.total > 0 ? a.total / you.total : null;
+  const basis = yourBasis(you);
+  const sessions = (id) => `${plural(o.providers?.[id]?.sessions || 0, 'session')} and ${plural(o.providers?.[id]?.subagents || 0, 'subagent')}`;
   return el('div', { class: 'card ov-time' }, [
     el('div', {}, [
-      el('div', { class: 'ov-eyebrow', text: 'Your time vs agent time' }),
+      el('div', { class: 'ov-eyebrow' }, ['Your time vs agent time', soFarTag(o)]),
       el('div', { class: 'ov-vs' }, [
-        el('div', {}, [el('div', { class: 'ov-hours is-you' }, spanBig(human)),
-          el('div', { class: 'ov-cap', text: `you, in ${o.sittings} sitting${o.sittings === 1 ? '' : 's'}` })]),
-        el('div', { class: 'ov-arrow', text: '→' }),
-        el('div', {}, [el('div', { class: 'ov-hours' }, spanBig(agent)),
-          el('div', { class: 'ov-cap', text: 'agents working' })]),
+        el('div', { class: 'ov-who', explain: `Your time in AI tools · ${spanText(you.total)}\n${yourExplain(o, you)}` }, [
+          el('div', { class: 'ov-hours is-you' }, spanBig(you.total)),
+          el('div', { class: 'ov-cap' }, ['you, in your AI tools ', el('span', { class: `ov-basis${you.measuredDays ? '' : ' is-est'}`, text: basis })]),
+        ]),
+        el('div', { class: 'ov-arrow', 'aria-hidden': 'true', text: '→' }),
+        el('div', { class: 'ov-who', explain: `Agent time · ${spanText(a.total)}\n${EXPLAIN.agent}\n`
+          + `Claude Code ${spanText(a.claude)} + Codex ${spanText(a.codex)} + Cursor ${spanText(a.cursor)}.` }, [
+          el('div', { class: 'ov-hours' }, spanBig(a.total)),
+          el('div', { class: 'ov-cap', text: 'agents working' }),
+        ]),
       ]),
-      human > 0 ? el('div', { class: 'ov-lev' }, [el('b', { text: `${(agent / human).toFixed(1)}×` }),
-        `every hour of yours drove ${(agent / human).toFixed(1)} hours of agent work`]) : null,
+      known(lever) ? el('div', { class: 'ov-lev', explain: `Agent hours per hour of yours · ${lever.toFixed(1)}×\n`
+        + `Agent time (${spanText(a.total)}) ÷ your time in AI tools (${spanText(you.total)}).\n`
+        + `${you.measuredDays ? `Your time is measured for ${plural(you.measuredDays, 'day')}` : 'Your time is estimated from your prompts'}`
+        + `${you.measuredDays && you.estimatedDays + you.pendingDays ? ` and estimated from your prompts for ${plural(you.estimatedDays + you.pendingDays, 'day')}` : ''}.` }, [
+        bold(`${lever.toFixed(1)}×`), `every hour of yours drove ${lever.toFixed(1)} hours of agent work`]) : null,
       el('p', { class: 'ov-note' }, [
-        `Agents ran for ${spanText(agent)} inside `, el('b', { text: spanText(o.wall_hours) }), ' of real time',
-        known(parallel) ? [', so ', el('b', { text: parallel.toFixed(1) }), ' were running at once on average'] : null,
-        '. ', el('b', { text: spanText(o.think_hours) }), ' of your time went on reading replies and deciding what to ask next.',
-      ].flat()),
+        `Agents ran for ${spanText(a.total)} inside `,
+        el('b', { text: spanText(wall), explain: `Real time with agents running · ${spanText(wall)}\n${EXPLAIN.wall}` }), ' of real time',
+        ...(known(parallel) ? [', so ', el('b', { text: parallel.toFixed(1), explain: `Agents at once · ${parallel.toFixed(1)} on average\n${EXPLAIN.parallel} ${spanText(a.total)} ÷ ${spanText(wall)}.` }),
+          ' were running at once on average'] : []),
+        '. ', el('b', { text: spanText(o.think_hours || 0), explain: `Reading and deciding · ${spanText(o.think_hours || 0)}\n${EXPLAIN.think}` }),
+        ' of your time went on reading replies and deciding what to ask next.',
+      ]),
     ]),
     el('div', { class: 'ov-lanes' }, [
-      lane('You', human, OV_HUE.you),
-      o.cursor_agent_hours != null ? lane('Cursor', cursor, OV_HUE.cursor) : null,
-      lane('Claude Code', claude, OV_HUE.claude),
-      lane('Codex', codex, OV_HUE.codex),
-      peak > 0 ? el('div', { class: 'ov-peak' }, [
+      lane('You', you.total, OV_HUE.you, `You · ${spanText(you.total)} in your AI tools\n${yourExplain(o, you)}`),
+      o.cursor_agent_hours != null ? lane('Cursor', a.cursor, OV_HUE.cursor, `Cursor · ${spanText(a.cursor)}\nEvery minute Cursor's dashboard logged a request, `
+        + 'merged into busy stretches the same way: a gap over 5 minutes ends one. Its dashboard records no chat boundaries, so Cursor counts as one agent.') : null,
+      lane('Claude Code', a.claude, OV_HUE.claude, `Claude Code · ${spanText(a.claude)}\nThe busy stretches of ${sessions('claude')}, added up. ${EXPLAIN.agent.split('. ')[0]}.`),
+      lane('Codex', a.codex, OV_HUE.codex, `Codex · ${spanText(a.codex)}\nThe busy stretches of ${sessions('codex')}, added up. ${EXPLAIN.agent.split('. ')[0]}.`),
+      peak > 0 ? el('div', { class: 'ov-peak', explain: `Most agents at once · ${peak}\n${EXPLAIN.peak}${o.peak?.at ? ` It happened ${whenText(o.peak.at)}.` : ''}` }, [
         el('div', { class: 'ov-peak-n', text: String(peak) }),
-        el('div', { class: 'ov-peak-d' }, [el('b', { text: `agent${peak === 1 ? '' : 's'} at once` }), `peak · ${peakAt}`]),
-        el('div', { class: 'ov-dots' }, Array.from({ length: Math.min(peak, 40) }, () => el('i'))),
+        el('div', { class: 'ov-peak-d' }, [bold(`agent${peak === 1 ? '' : 's'} at once`), `peak${o.peak?.at ? ` · ${whenText(o.peak.at)}` : ''}`]),
+        el('div', { class: 'ov-dots', 'aria-hidden': 'true' }, Array.from({ length: Math.min(peak, 40) }, () => el('i'))),
       ]) : null,
     ]),
   ]);
 }
 
-const hourName = (h) => `${h % 12 || 12}${h < 12 ? 'a' : 'p'}`;
-
-/** Today hour by hour: minutes at the computer in each hour. */
-function overviewDeskToday(o) {
-  const hours = o.hours || [];
-  const now = new Date().getHours();
-  const total = o.human_hours || 0;
-  const best = hours.reduce((a, h) => (h.you > (a?.you || 0) ? h : a), null);
-  const minutesText = (h) => `${Math.round(h * 60)}m`;
-  const plot = el('div', { class: 'ov-desk-plot' }, hours.map((h) => el('div', {
-    class: `ov-dcol${h.hour > now ? ' is-later' : ''}`,
-    title: `${hourName(h.hour)}–${hourName((h.hour + 1) % 24)} · ${spanText(h.you)}`,
-  }, [
-    el('div', { class: `ov-dbar${h === best ? ' is-best' : ''}`, vars: { '--h': `${Math.min(1, h.you) * 100}%`, '--o': (0.35 + 0.65 * Math.min(1, h.you)).toFixed(2) } }, [
-      h.you >= 0.25 ? el('span', { class: 'ov-dval', text: minutesText(h.you) }) : null,
-    ]),
-  ])));
-  const axis = el('div', { class: 'ov-desk-x' }, hours.map((h) => el('span', { text: h.hour % 6 === 0 ? hourName(h.hour) : '' })));
-  const stat = (label, value, color) => el('div', { class: `ov-dstat${color ? ' is-hi' : ''}`, vars: color ? { '--c': color } : {} }, [
-    el('span', {}, [el('i'), label]), el('b', { text: value }),
+/** Time in your AI tools: each app's measured hours, and the estimate for
+    the days before measuring began. */
+function overviewFocus(o, you) {
+  const apps = !you.measuredDays ? [] : (o.focus?.apps || []).filter((app) => app.hours > 0)
+    .map((app) => ({ ...focusApp(app.id, app.label), hours: app.hours })).sort((x, y) => y.hours - x.hours);
+  const rest = you.estimatedDays + you.pendingDays;
+  const top = Math.max(0.01, ...apps.map((app) => app.hours), you.estimated);
+  const row = (name, hue, hours, text, est) => el('div', { class: 'ov-arow', explain: text }, [
+    el('span', { class: 'ov-aname' }, [el('i', { class: `ov-sw${est ? ' is-est' : ''}`, vars: hue ? { '--c': hue } : {} }), name]),
+    el('span', { class: 'ov-tbar' }, [el('i', { class: est ? 'is-est' : null, vars: { '--w': `${(hours / top) * 100}%`, '--c': hue || OV_HUE.you } })]),
+    el('span', { class: 'ov-tc', text: spanText(hours) }),
   ]);
-  const first = o.first_seen ? new Date(o.first_seen * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '—';
-  return el('div', { class: 'card ov-chart' }, [
-    el('div', { class: 'ov-head' }, [
-      el('h2', { text: 'Your time at the computer' }),
-      el('span', { class: 'ov-muted' }, [el('b', { text: spanText(total) }), ' today']),
-    ]),
-    el('div', { class: 'ov-desk-stats' }, [
-      stat('At the computer', spanText(total), OV_HUE.you),
-      stat('Sittings', String(o.sittings || 0)),
-      stat('Longest sitting', o.longest_sitting ? spanText(o.longest_sitting.hours) : '—'),
-      stat('First here', first),
-    ]),
-    plot,
-    axis,
-  ]);
-}
-
-/** Your time at the computer, one bar per day of the range. */
-function overviewDesk(o) {
-  if (o.range === 'day') return overviewDeskToday(o);
-  const days = o.desk_days || [];
-  if (!days.length) return null;
-  const total = days.reduce((s, d) => s + d.hours, 0);
-  // Averaged over the days you showed up; days with no prompts say nothing about a day's work.
-  const active = days.filter((d) => d.hours > 0).length;
-  const avg = active ? total / active : 0;
-  const best = days.reduce((a, d) => (d.hours > (a?.hours || 0) ? d : a), null);
-  const long = days.filter((d) => d.hours >= 12).length;
-  let streak = 0;
-  for (let i = days.length - 1; i >= 0; i--) {
-    if (days[i].hours >= 1) streak++;
-    else if (i < days.length - 1) break;
+  const share = (h) => (you.measured > 0 ? `, ${Math.round((100 * h) / you.measured)}% of the measured time` : '');
+  const rows = apps.map((app) => row(app.label, app.hue, app.hours,
+    `${app.label} · ${spanText(app.hours)}\n${app.what ? `${app.what} ` : ''}Time with it in front while you were active${share(app.hours)}, measured since ${whenText(you.since)}.`));
+  if (rest && you.estimated > 0) {
+    rows.push(row('Estimated from your prompts', null, you.estimated, `Estimated · ${spanText(you.estimated)}\n`
+      + `${you.measuredDays ? `For the ${plural(rest, 'day')} before measuring began` : 'For every day here'}, your time is estimated from ${EXPLAIN.estimate}`
+      + '\nAn estimate can\'t tell which app you were in.', true));
   }
-  const scale = Math.max(8, Math.ceil(Math.max(...days.map((d) => d.hours)) / 4) * 4);
-  const dayName = (date, opts) => new Date(`${date}T12:00`).toLocaleDateString([], opts);
-  const step = days.length > 21 ? 7 : days.length > 10 ? 3 : 1;
-  const y = (h) => `${(h / scale) * 100}%`;
-  const plot = el('div', { class: 'ov-desk-plot' }, [
-    el('div', { class: 'ov-desk-ref', vars: { '--y': y(8) } }, [Math.abs(avg - 8) > scale * 0.12 ? el('span', { text: '8 h' }) : null]),
-    el('div', { class: 'ov-desk-avg', vars: { '--y': y(avg) } }, [el('span', { text: `avg ${spanText(avg)}` })]),
-    ...days.map((d) => el('div', { class: 'ov-dcol', title: `${dayName(d.date, { weekday: 'short', month: 'short', day: 'numeric' })} · ${spanText(d.hours)}` }, [
-      el('div', { class: `ov-dbar${d === best ? ' is-best' : ''}`, vars: { '--h': y(d.hours), '--o': (0.35 + 0.65 * Math.min(1, d.hours / 14)).toFixed(2) } }, [
-        d.hours >= 0.75 && days.length <= 24 ? el('span', { class: 'ov-dval', text: hoursShort(d.hours) }) : null,
-      ]),
-    ])),
-  ]);
-  const axis = el('div', { class: 'ov-desk-x' }, days.map((d, i) => el('span', {
-    class: i === days.length - 1 ? 'is-today' : null,
-    text: i === days.length - 1 ? 'Today' : i % step === 0 && days.length - 1 - i >= step ? dayName(d.date, { month: 'short', day: 'numeric' }) : '',
-  })));
-  const stat = (label, value, color) => el('div', { class: `ov-dstat${color ? ' is-hi' : ''}`, vars: color ? { '--c': color } : {} }, [
-    el('span', {}, [el('i'), label]), el('b', { text: value }),
-  ]);
-  return el('div', { class: 'card ov-chart' }, [
-    el('div', { class: 'ov-head' }, [
-      el('h2', { text: 'Your time at the computer' }),
-      el('span', { class: 'ov-muted' }, [el('b', { text: spanText(total) }), ` on ${active} of ${days.length} day${days.length === 1 ? '' : 's'}`]),
+  const sub = you.measuredDays
+    ? `Measured on this computer since ${whenText(you.since)}${rest ? '; earlier days are estimated from your prompts' : ''}.`
+    : o.focus ? 'Measuring starts once TOKENMAXXING has seen which app is in front; until then, time is estimated from your prompts.'
+      : 'Estimated from your prompts.';
+  return el('div', { class: 'card ov-chart ov-focus' }, [
+    el('div', { class: 'ov-head', explain: `Time in your AI tools · ${spanText(you.total)}\nMeasured: ${focusBody(o)}\n`
+      + `Before measuring began, estimated from ${EXPLAIN.estimate}` }, [
+      el('h2', { text: 'Time in your AI tools' }),
+      el('span', { class: 'ov-muted' }, [bold(spanText(you.total)), ` in ${rangeOf(o.range)[1]}`]),
     ]),
-    el('div', { class: 'ov-desk-stats' }, [
-      stat('Average active day', spanText(avg)),
-      best ? stat(`Longest · ${dayName(best.date, { weekday: 'short', month: 'short', day: 'numeric' })}`, spanText(best.hours), OV_HUE.you) : null,
-      stat('Days over 12 h', String(long)),
-      stat('Streak', `${streak} day${streak === 1 ? '' : 's'}`),
-    ]),
-    plot,
-    axis,
+    el('div', { class: 'ov-muted ov-focus-sub', text: sub }),
+    ...rows,
+    rows.length ? null : el('div', { class: 'ov-muted ov-gap', text: 'No time in AI tools in these days.' }),
   ]);
 }
+
+// ── day by day ──
+
+const niceScale = (top) => (top <= 1 ? 1 : top <= 2 ? 2 : Math.ceil(top / 4) * 4);
+
+/** A day's label: weekdays for a week, a date a week apart for a month. */
+function dayLabel(days, i) {
+  const date = days[i].date;
+  if (date === isoDate()) return 'Today';
+  if (days.length <= 10) return dateOf(date, { weekday: 'short' });
+  return i % 7 === 0 && days.length - 1 - i >= 7 ? dateOf(date, { month: 'short', day: 'numeric' }) : '';
+}
+
+/** One column per day: stacked segments, an outline for an estimate, or
+    hatching for a day not read yet. Arrow keys step through the days. */
+function dayPlot(cols, label) {
+  const scale = niceScale(Math.max(0, ...cols.map((c) => c.total)));
+  const dense = cols.length > 14;
+  const nodes = cols.map((c) => {
+    const segSum = c.segs.reduce((s, x) => s + x.h, 0);
+    const value = c.kind === 'estimated' ? `~${hoursShort(c.total)}` : hoursShort(c.total);
+    return el('div', { class: `ov-pcol is-${c.kind}`, 'aria-label': c.text.split('\n')[0],
+      vars: { '--h': `${Math.min(1, c.total / scale) * 100}%` }, explain: c.text }, [
+      !dense && c.kind !== 'pending' && c.total >= 0.05 ? el('span', { class: 'ov-pval', 'aria-hidden': 'true', text: value }) : null,
+      c.kind !== 'pending' && c.total > 0 ? el('div', { class: 'ov-stack' },
+        c.segs.map((s) => el('i', { vars: { '--f': segSum ? s.h / segSum : 0, '--c': s.hue } }))) : null,
+    ]);
+  });
+  return rove(el('div', { class: `ov-plot${dense ? ' is-dense' : ''}`, role: 'group', 'aria-label': label }, [
+    el('span', { class: 'ov-plot-top', 'aria-hidden': 'true', text: hoursShort(scale) }), ...nodes,
+  ]), nodes);
+}
+
+const legend = (items) => el('div', { class: 'ov-legend' }, items.map(([name, hue, cls]) => el('span', {}, [
+  el('i', { class: `ov-sw${cls ? ` ${cls}` : ''}`, vars: hue ? { '--c': hue } : {} }), name,
+])));
+
+function youColumn(d) {
+  const day = dateOf(d.date);
+  if (d.kind === 'pending') return { kind: 'pending', total: 0, segs: [], text: `${day} · not read yet\n${EXPLAIN.pending}` };
+  if (d.kind === 'estimated') {
+    return { kind: 'estimated', total: d.hours, segs: [], text: `${day} · about ${spanText(d.hours)}, estimated from your prompts\n`
+      + `Before measuring began, a day's time is estimated from ${EXPLAIN.estimate}` };
+  }
+  const apps = Object.entries(d.apps).filter(([, h]) => h > 0).map(([id, h]) => ({ ...focusApp(id), h }))
+    .sort((x, y) => x.rank - y.rank || y.h - x.h);
+  const list = apps.length ? apps.map((app) => `${app.label} ${spanText(app.h)}`).join(', ') : 'no AI tool was in front while you were active';
+  return {
+    kind: 'measured', total: d.hours,
+    segs: apps.length ? apps.map((app) => ({ h: app.h, hue: app.hue })) : [{ h: d.hours, hue: OV_HUE.you }],
+    text: `${day} · ${spanText(d.hours)} in your AI tools\nMeasured: ${list}.`
+      + `${d.began ? `\nMeasuring began at ${new Date(d.began * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}; earlier that day isn't counted.` : ''}`,
+  };
+}
+
+function agentColumn(o, d) {
+  const day = dateOf(d.date);
+  if (dayPending(o, d.date)) return { kind: 'pending', total: 0, segs: [], text: `${day} · not read yet\n${EXPLAIN.pending}` };
+  const parts = OV_AGENTS.map(([id, label]) => ({ id, label, h: d[id] || 0, hue: OV_HUE[id] }));
+  const total = parts.reduce((s, p) => s + p.h, 0);
+  const busy = parts.filter((p) => p.h >= 0.01);
+  const cents = d.cents && typeof d.cents === 'object' ? d.cents : null;
+  const worth = cents ? OV_AGENTS.reduce((s, [id]) => s + (cents[id] || 0), 0) : 0;
+  return {
+    kind: 'value', total, segs: busy.map(({ h, hue }) => ({ h, hue })),
+    text: [`${day} · ${spanText(total)} of agent time`,
+      busy.length ? `${busy.map((p) => `${p.label} ${spanText(p.h)}`).join(', ')}: each agent's busy stretches that day, added up.` : 'No agent was working.',
+      worth > 0 ? `Worth ${money(worth)} at API prices: ${OV_AGENTS.filter(([id]) => cents[id] > 0).map(([id, label]) => `${label} ${money(cents[id])}`).join(', ')}.` : null,
+    ].filter(Boolean).join('\n'),
+  };
+}
+
+function overviewDaily(o, you) {
+  const days = o.days?.length ? o.days : you.days;
+  if (!days.length) return null;
+  const a = agentHours(o);
+  const pending = days.some((d) => dayPending(o, d.date));
+  const seen = new Map();
+  for (const d of you.days) for (const [id, h] of Object.entries(d.apps)) if (h > 0) seen.set(id, focusApp(id));
+  const youLegend = [...seen.values()].sort((x, y) => x.rank - y.rank).map((app) => [app.label, app.hue]);
+  if (you.measuredDays && !seen.size) youLegend.push(['Measured', OV_HUE.you]);
+  if (you.estimatedDays) youLegend.push(['Estimated', null, 'is-est']);
+  if (pending) youLegend.push(['Not read yet', null, 'is-pending']);
+  const agentLegend = OV_AGENTS.filter(([id]) => days.some((d) => (d[id] || 0) >= 0.02)).map(([id, label]) => [label, OV_HUE[id]]);
+  if (pending) agentLegend.push(['Not read yet', null, 'is-pending']);
+  const dense = days.length > 14;
+  const hatch = pending ? ' Hatched days haven\'t been read yet.' : '';
+  return el('div', { class: 'card ov-chart ov-daily' }, [
+    el('div', { class: 'ov-head', explain: `Day by day\nEach of the ${plural(days.length, 'day')}, today on the right: your time in AI tools above, `
+      + 'agent time below, on their own scales. Hover a day, or Tab to a chart and use the arrow keys, for what it holds.' }, [
+      el('h2', { text: 'Day by day' }),
+      el('span', { class: 'ov-muted', text: `${shortDate(o.since)} – today` }),
+    ]),
+    el('div', { class: 'ov-sub' }, [
+      el('span', { explain: `Your time in AI tools · ${spanText(you.total)}\nOne column per day, each app in its own colour. `
+        + `Outlined days are estimated from your prompts, before measuring began.${hatch}\n${yourExplain(o, you)}` }, ['Your time in AI tools ', bold(spanText(you.total))]),
+      legend(youLegend),
+    ]),
+    dayPlot(you.days.map(youColumn), 'Your time in AI tools per day'),
+    el('div', { class: 'ov-sub' }, [
+      el('span', { explain: `Agent time · ${spanText(a.total)}\nOne column per day, stacked by agent.${hatch}\n${EXPLAIN.agent}` }, ['Agent time ', bold(spanText(a.total))]),
+      legend(agentLegend),
+    ]),
+    dayPlot((o.days || []).map((d) => agentColumn(o, d)), 'Agent time per day'),
+    el('div', { class: `ov-axis${dense ? ' is-dense' : ''}`, 'aria-hidden': 'true' },
+      days.map((d, i) => el('span', { class: d.date === isoDate() ? 'is-today' : null, text: dayLabel(days, i) }))),
+  ]);
+}
+
+// ── what the agents did ──
 
 function overviewTiles(o) {
-  const agents = ['claude', 'codex'].reduce((s, id) => s + (o.providers?.[id]?.sessions || 0) + (o.providers?.[id]?.subagents || 0), 0);
-  const sessions = ['claude', 'codex'].reduce((s, id) => s + (o.providers?.[id]?.sessions || 0), 0);
-  const agentHours = (o.providers?.claude?.agent_hours || 0) + (o.providers?.codex?.agent_hours || 0);
-  const tile = (label, value, note) => el('div', { class: 'card ov-tile' }, [
+  const p = (id, key) => o.providers?.[id]?.[key] || 0;
+  const sessions = p('claude', 'sessions') + p('codex', 'sessions');
+  const subagents = p('claude', 'subagents') + p('codex', 'subagents');
+  const hours = p('claude', 'agent_hours') + p('codex', 'agent_hours');
+  const calls = o.tool_calls || 0;
+  const prompts = o.prompts || 0;
+  const tile = (label, value, note, text) => el('div', { class: 'card ov-tile', explain: text }, [
     el('div', { class: 'ov-eyebrow', text: label }), el('div', { class: 'ov-tv', text: value }), el('div', { class: 'ov-tn' }, note),
   ]);
   // Cursor chats active in the range: the ones you started, and the
   // subagents (Grok Bot's automations among them) that they spawned.
-  const convs = (state.cycle?.conversations || []).filter((c) => o.range === 'cycle' || !c.last_at || c.last_at >= o.since);
+  const convs = (state.cycle?.conversations || []).filter((c) => !c.last_at || c.last_at >= o.since);
   const subs = convs.filter((c) => c.subagent).length;
   return el('div', { class: 'ov-tiles' }, [
-    tile('Agents', String(agents), [el('b', { text: String(sessions) }), ' sessions · ', el('b', { text: String(agents - sessions) }), ' sub']),
-    tile('Tool calls', compact(o.tool_calls), agentHours > 0 ? [el('b', { text: `~${Math.round(o.tool_calls / agentHours)}` }), ' per agent-hour'] : []),
-    tile('Your prompts', String(o.prompts), o.prompts ? [el('b', { text: `~${Math.round(o.tool_calls / o.prompts)}` }), ' tool calls each'] : []),
-    convs.length ? tile('Cursor chats', String(convs.length - subs), subs ? [el('b', { text: compact(subs) }), ' subagents'] : [])
-      : tile('Sittings', String(o.sittings), o.longest_sitting ? ['longest ', el('b', { text: spanText(o.longest_sitting.hours) })] : []),
+    tile('Agents', count(sessions + subagents), [bold(count(sessions)), ' sessions · ', bold(count(subagents)), ' sub'],
+      `Agents · ${count(sessions + subagents)}\nSessions: Claude Code and Codex session logs with activity in these days (${count(sessions)}). `
+      + `Subagents: helpers those sessions started, each with its own log (${count(subagents)}).\nCursor's dashboard has no chat boundaries, so it isn't counted here.`),
+    tile('Tool calls', compact(calls), hours > 0 ? [bold(`~${Math.round(calls / hours)}`), ' per agent-hour'] : [],
+      `Tool calls · ${count(calls)}\n${EXPLAIN.tools}`
+      + `${hours > 0 ? `\nAbout ${Math.round(calls / hours)} per agent-hour: tool calls ÷ ${spanText(hours)} of Claude Code and Codex agent time.` : ''}`),
+    tile('Your prompts', count(prompts), prompts ? [bold(`~${Math.round(calls / prompts)}`), ' tool calls each'] : [],
+      `Your prompts · ${count(prompts)}\n${EXPLAIN.prompts}${prompts ? `\nAbout ${Math.round(calls / prompts)} tool calls each: tool calls ÷ prompts.` : ''}`),
+    convs.length
+      ? tile('Cursor chats', count(convs.length - subs), subs ? [bold(compact(subs)), ` subagent${subs === 1 ? '' : 's'}`] : [],
+        `Cursor chats · ${count(convs.length - subs)}\nCursor conversations active in these days, from its dashboard for the current billing cycle`
+        + `${subs ? `, plus ${plural(subs, 'subagent')} they spawned, automations among them` : ''}.`)
+      : tile('Sittings', count(o.sittings || 0), o.longest_sitting ? ['longest ', bold(spanText(o.longest_sitting.hours))] : [],
+        `Sittings · ${count(o.sittings || 0)}\nYour prompts grouped where they're less than 30 minutes apart, each with 5 minutes added for reading the last reply.`
+        + `${o.longest_sitting ? `\nLongest: ${spanText(o.longest_sitting.hours)}, from ${whenText(o.longest_sitting.start)}.` : ''}`),
   ]);
 }
 
-/** Agent hours stacked by provider: per hour today, per day otherwise. */
-function overviewDays(o) {
-  const today = o.range === 'day';
-  const days = today ? o.hours || [] : o.days || [];
-  const lanes = [['codex', 'Codex', OV_HUE.codex], ['claude', 'Claude', OV_HUE.claude], ['cursor', 'Cursor', OV_HUE.cursor]]
-    .filter(([id]) => days.some((d) => (d[id] || 0) >= 0.02));
-  const sumDay = (d) => lanes.reduce((s, [id]) => s + (d[id] || 0), 0);
-  const top = Math.max(1, ...days.map(sumDay));
-  const scale = Math.ceil(top / 4) * 4;
-  // Long ranges label a column a week, and drop the per-bar values that would collide.
-  const step = today ? 6 : days.length > 10 ? 7 : 1;
-  const crowded = days.length > 14;
-  const label = (d, i) => {
-    if (today) return d.hour % step === 0 ? hourName(d.hour) : '';
-    if (i === days.length - 1) return 'Today';
-    if (step === 1) return WEEKDAYS[(new Date(`${d.date}T12:00`).getDay() + 6) % 7];
-    return i % step === 0 && days.length - 1 - i >= step ? new Date(`${d.date}T12:00`).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '';
-  };
-  const cols = days.map((d, i) => {
-    const total = sumDay(d);
-    return el('div', { class: 'ov-col', title: `${today ? hourName(d.hour) : d.date} · ${spanText(total)} of agent time` }, [
-      total >= 0.05 && !crowded ? el('span', { class: 'ov-col-v', text: hoursShort(total) }) : null,
-      el('div', { class: 'ov-col-bar', vars: { '--h': `${(total / scale) * 100}%` } },
-        lanes.map(([id, , c]) => ((d[id] || 0) >= 0.02 ? el('i', { vars: { '--f': d[id] / total, '--c': c } }) : null))),
-      el('span', { class: `ov-col-x${!today && i === days.length - 1 ? ' is-today' : ''}`, text: label(d, i) }),
-    ]);
-  });
+function overviewTools(o) {
+  const all = o.tools || [];
+  const calls = o.tool_calls || 0;
+  const other = all.find(([name]) => name === 'Other')?.[1] || 0;
+  const tools = all.filter(([name]) => name !== 'Other').slice(0, 8);
+  const top = Math.max(1, ...tools.map(([, n]) => n));
   return el('div', { class: 'card ov-chart' }, [
-    el('div', { class: 'ov-head' }, [el('h2', { text: today ? 'Agent hours by hour' : 'Agent hours per day' }), el('div', { class: 'ov-legend' },
-      [...lanes].reverse().map(([, name, c]) => el('span', {}, [el('i', { class: 'ov-sw', vars: { '--c': c } }), name])))]),
-    el('div', { class: `ov-bars${crowded || today ? ' is-dense' : ''}` }, cols),
+    el('div', { class: 'ov-head', explain: `Tools they used · ${count(calls)} calls\n${EXPLAIN.tools}`
+      + `${other ? ` ${plural(other, 'call')} to tools outside these groups aren't drawn.` : ''}` }, [
+      el('h2', { text: 'Tools they used' }), el('span', { class: 'ov-muted', text: `${count(calls)} tool calls` }),
+    ]),
+    ...tools.map(([name, n]) => el('div', { class: 'ov-trow', explain: `${name} · ${plural(n, 'call')}${calls ? `, ${Math.round((100 * n) / calls)}% of all` : ''}\n`
+      + `${TOOL_KINDS[name] || 'Tool calls in this group.'}` }, [
+      el('span', { class: 'ov-tname', text: name }),
+      el('span', { class: 'ov-tbar' }, [el('i', { vars: { '--w': `${(n / top) * 100}%` } })]),
+      el('span', { class: 'ov-tc', text: n >= 1000 ? compact(n).toUpperCase() : String(n) }),
+    ])),
+    tools.length ? null : el('div', { class: 'ov-muted ov-gap', text: 'No tool calls in these days.' }),
   ]);
 }
 
 function overviewHeat(o) {
   const heat = o.heat || [];
   const top = Math.max(1, ...heat.flat());
-  const grid = el('div', { class: 'ov-heat' });
+  const grid = el('div', { class: 'ov-heat', role: 'group', 'aria-label': 'Agent minutes by weekday and hour' });
+  const cells = [];
   heat.forEach((row, d) => {
-    grid.append(el('span', { class: 'ov-heat-d', text: WEEKDAYS[d] }));
-    row.forEach((minutes, hour) => grid.append(el('i', {
-      class: minutes > 0 ? 'is-on' : null,
-      vars: minutes > 0 ? { '--a': (0.2 + Math.sqrt(minutes / top) * 0.8).toFixed(2) } : {},
-      title: `${WEEKDAYS[d]} ${hour}:00 · ${Math.round(minutes)} agent-min`,
-    })));
+    grid.append(el('span', { class: 'ov-heat-d', 'aria-hidden': 'true', text: WEEKDAYS[d] }));
+    row.forEach((minutes, hour) => {
+      const name = `${WEEKDAYS[d]} ${hourName(hour)}–${hourName((hour + 1) % 24)} · ${count(Math.round(minutes))} agent-minutes`;
+      const cell = el('i', {
+        class: minutes > 0 ? 'is-on' : null, 'aria-label': name,
+        vars: minutes > 0 ? { '--a': (0.2 + Math.sqrt(minutes / top) * 0.8).toFixed(2) } : {},
+        explain: `${name}\nEvery agent's busy minutes in this hour of the week, added up over these days.`,
+      });
+      cells.push(cell);
+      grid.append(cell);
+    });
   });
+  if (cells.length) rove(grid, cells, 24);
   return el('div', { class: 'card ov-chart' }, [
-    el('div', { class: 'ov-head' }, [el('h2', { text: 'When agents run' }), el('span', { class: 'ov-muted', text: 'agent-minutes by hour' })]),
+    el('div', { class: 'ov-head', explain: `When agents run\n${EXPLAIN.heat}` }, [
+      el('h2', { text: 'When agents run' }), el('span', { class: 'ov-muted', text: 'agent-minutes by hour' }),
+    ]),
     grid,
-    el('div', { class: 'ov-heat-x' }, ['', '12a', '6a', '12p', '6p'].map((t) => el('span', { text: t }))),
-  ]);
-}
-
-function overviewTools(o) {
-  const tools = (o.tools || []).filter(([name]) => name !== 'Other').slice(0, 7);
-  const top = Math.max(1, ...tools.map(([, n]) => n));
-  return el('div', { class: 'card ov-chart' }, [
-    el('div', { class: 'ov-head' }, [el('h2', { text: 'What agents did' }), el('span', { class: 'ov-muted', text: `${o.tool_calls.toLocaleString('en-US')} tool calls` })]),
-    ...tools.map(([name, n]) => el('div', { class: 'ov-trow' }, [
-      el('span', { class: 'ov-tname', text: name }),
-      el('span', { class: 'ov-tbar' }, [el('i', { vars: { '--w': `${(n / top) * 100}%` } })]),
-      el('span', { class: 'ov-tc', text: n >= 1000 ? compact(n).toUpperCase() : String(n) }),
-    ])),
+    el('div', { class: 'ov-heat-x', 'aria-hidden': 'true' }, ['', '12a', '6a', '12p', '6p'].map((t) => el('span', { text: t }))),
   ]);
 }
 
 function overviewMix(rows) {
   const sum = (key) => rows.reduce((s, r) => s + (r.tokens?.[key] || 0), 0);
-  const parts = [['cache_read', 'Cache read', 'var(--ov-a3)'], ['input', 'Input', 'var(--accent)'],
-    ['cache_write', 'Cache write', 'var(--ov-a2)'], ['output', 'Output', 'var(--ink)']].map(([key, label, c]) => ({ label, c, n: sum(key) }));
-  const total = parts.reduce((s, p) => s + p.n, 0) || 1;
+  const parts = [
+    ['cache_read', 'Cache read', 'var(--ov-a3)', 'Context re-sent and served from the provider\'s cache: billed at a fraction of input.'],
+    ['input', 'Input', 'var(--accent)', 'Context sent to the model that wasn\'t served from the cache.'],
+    ['cache_write', 'Cache write', 'var(--ov-a2)', 'Context stored in the provider\'s cache so later requests can read it cheaply.'],
+    ['output', 'Output', 'var(--ink)', 'What the models wrote: replies, code and tool calls, with any reasoning.'],
+  ].map(([key, label, c, what]) => ({ label, c, what, n: sum(key) }));
+  const total = parts.reduce((s, p) => s + p.n, 0);
   const output = parts[3].n;
+  const pages = Math.round((output * 0.75) / 500);
+  const text = (p) => `${p.label} · ${compact(p.n)} tokens${total ? `, ${Math.round((100 * p.n) / total)}%` : ''}\n${p.what}`;
   return el('div', { class: 'card ov-chart' }, [
-    el('div', { class: 'ov-head' }, [el('h2', { text: 'Token mix' }), el('span', { class: 'ov-muted', text: `${compact(total)} total` })]),
-    el('div', { class: 'ov-mix' }, parts.map((p) => el('i', { vars: { '--w': `${Math.max(0.4, (p.n / total) * 100)}%`, '--c': p.c } }))),
-    el('div', { class: 'ov-mixl' }, parts.map((p) => el('span', {}, [el('i', { class: 'ov-sw', vars: { '--c': p.c } }), p.label, el('b', { text: compact(p.n) })]))),
-    output > 0 ? el('div', { class: 'ov-muted ov-gap' }, ['Agents wrote ', el('b', { text: compact(output) }),
-      ` tokens of output, about ${Math.round((output * 0.75) / 500).toLocaleString('en-US')} pages of text.`]) : null,
+    el('div', { class: 'ov-head', explain: `Token mix · ${count(total)} tokens\n${EXPLAIN.tokens} The bar splits them by kind.` }, [
+      el('h2', { text: 'Token mix' }), el('span', { class: 'ov-muted', text: `${compact(total)} total` }),
+    ]),
+    // Hover-only on the bar; the legend below carries the same words for the keyboard.
+    el('div', { class: 'ov-mix' }, parts.map((p) => el('i', { tabindex: '-1', explain: text(p), vars: { '--w': `${Math.max(0.4, (p.n / (total || 1)) * 100)}%`, '--c': p.c } }))),
+    el('div', { class: 'ov-mixl' }, parts.map((p) => el('span', { explain: text(p) }, [el('i', { class: 'ov-sw', vars: { '--c': p.c } }), p.label, bold(compact(p.n))]))),
+    output > 0 ? el('div', { class: 'ov-muted ov-gap', explain: `About ${count(pages)} pages\n${compact(output)} output tokens × 0.75 words per token ÷ 500 words a page.` },
+      ['Agents wrote ', bold(compact(output)), ` tokens of output, about ${count(pages)} pages of text.`]) : null,
   ]);
 }
 
-function overviewRanges(loading) {
+function overviewFoot(o) {
+  const db = o.db;
+  const file = db?.path ? String(db.path).split(/[\\/]/).pop() : null;
+  const size = known(db?.bytes) ? sizeText(db.bytes) : null;
+  // Cursor's request times are fetched per billing cycle; the ledger keeps them once read.
+  const cycleStart = state.cycle?.cycle_start ? Date.parse(state.cycle.cycle_start) / 1000 : null;
+  const before = !o.cursor?.complete && known(cycleStart) && o.since < cycleStart - 60
+    ? ` Cursor's request times start ${shortDate(cycleStart)}, when its billing cycle began; before then, your time and agent time are Claude Code and Codex only.` : '';
+  return el('div', { class: 'ov-foot' }, [
+    file ? el('div', { class: 'ov-where', explain: `Where the data lives\n${db.path}\nA SQLite database on this computer${size ? `, ${size}` : ''}. `
+      + 'It keeps what your Claude Code and Codex logs and Cursor\'s dashboard said, priced as they were read, and the time measured in your AI tools. '
+      + 'Nothing in it leaves this computer.' }, [`Kept on this computer in ${file}${size ? ` · ${size}` : ''}. Nothing leaves it.`]) : null,
+    el('div', { text: `Values are API-price equivalents, not what you were charged.${before}` }),
+  ]);
+}
+
+function overviewRanges(stale) {
   return el('div', { class: 'ov-ranges' }, [
-    el('div', { class: 'filter-chips is-quiet', role: 'radiogroup', 'aria-label': 'Range' }, OV_RANGES.map(([id, label]) => el('button', {
+    el('div', { class: 'filter-chips is-quiet', role: 'radiogroup', 'aria-label': 'Range' }, OV_RANGES.map(([id, label, days]) => el('button', {
       type: 'button', class: 'filter-chip', role: 'radio', 'aria-checked': String(id === state.overviewRange), text: label,
+      explain: `${label}\nToday and the ${days - 1} days before it, from local midnight on ${shortDate(rangeSince(id))}.`,
       onclick: () => setOverviewRange(id),
     }))),
-    loading ? el('span', { class: 'ov-muted', text: 'Reading your agent logs…' }) : null,
+    stale ? el('span', { class: 'ov-muted', text: 'Updating…' })
+      : state.overviewError ? el('span', { class: 'ov-muted', text: `Couldn't refresh: ${state.overviewError}` }) : null,
   ]);
 }
 
+/** Everything the Overview draws from, less the history build's byte count,
+    which only moves its strip. */
+function overviewKey(o) {
+  const c = state.cycle;
+  const build = o.backfill ? { ...o.backfill, read_bytes: 0, total_bytes: 0 } : null;
+  return JSON.stringify([{ ...o, backfill: build }, state.overviewRange, state.overviewError, state.priceEditor, isoDate(),
+    c && [c.plan, c.cycle_start, c.range_totals, (c.conversations || []).map((x) => [x.last_at, x.subagent])]]);
+}
+
+let overviewDrawn = null;
 function renderOverview() {
   const host = $('overviewBody');
-  const o = state.overview;
+  const o = shownOverview();
   if (!o) {
+    overviewDrawn = null;
     host.replaceChildren(overviewRanges(false), overviewReading());
     return;
   }
-  // Until the chosen range arrives, the last one stays up, dimmed.
-  const stale = o.since !== overviewSince();
+  const key = overviewKey(o);
+  if (key === overviewDrawn) {
+    // Only the build's progress moved: redraw its strip alone, so a figure
+    // being read or a focused bar stays put.
+    const strip = host.querySelector('.ov-build');
+    if (strip) strip.replaceWith(overviewBuild(o));
+    return;
+  }
+  overviewDrawn = key;
+  const focusables = () => [...host.querySelectorAll('[data-explain], button, input')];
+  const focused = focusables().indexOf(document.activeElement);
+  // Until the chosen range arrives, the other one stays up, dimmed.
+  const stale = o.range !== state.overviewRange;
   const rows = overviewProviders(o);
-  const unpriced = ['claude', 'codex'].reduce((s, id) => s + (o.providers?.[id]?.unpriced_requests || 0), 0);
-  const heat = o.range === 'day' ? null : overviewHeat(o);
-  // Cursor's request times are fetched for this cycle only.
-  const cycleStart = state.cycle?.cycle_start ? Date.parse(state.cycle.cycle_start) / 1000 : null;
-  const before = known(cycleStart) && o.since < cycleStart - 60
-    ? ` Cursor's request times start ${new Date(cycleStart * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' })}, when this cycle began; before then, your time and agent time are Claude and Codex only.` : '';
+  const you = yourTime(o);
   host.replaceChildren(overviewRanges(stale), el('div', { class: `ov${stale ? ' is-stale' : ''}` }, [
+    overviewBuild(o),
     overviewHero(o, rows),
-    overviewTime(o),
-    overviewDesk(o),
+    overviewTime(o, you),
+    overviewFocus(o, you),
+    overviewDaily(o, you),
+    el('div', { class: 'ov-section', explain: 'What the agents did\nFrom your Claude Code and Codex logs: how many agents ran, the tools they called and how often. '
+      + 'When they ran and the tokens they used include Cursor too.' }, ['What the agents did', soFarTag(o)]),
     overviewTiles(o),
-    heat ? el('div', { class: 'ov-two' }, [overviewDays(o), heat]) : overviewDays(o),
-    el('div', { class: 'ov-two' }, [overviewTools(o), overviewMix(rows)]),
-    el('div', { class: 'ov-foot', text: 'Values are API-price equivalents: Cursor from its dashboard, Claude Code and Codex priced from local logs.'
-      + (unpriced ? ` ${unpriced.toLocaleString('en-US')} requests used a model with no published price and count as $0.` : '')
-      + ' Your time is counted from the Claude and Codex prompts you typed and the minutes your own Cursor and Grok Bot chats were working;'
-      + ' subagents, automations and background runs are agent time only.' + before }),
+    el('div', { class: 'ov-two' }, [overviewTools(o), overviewHeat(o)]),
+    overviewMix(rows),
+    overviewFoot(o),
   ]));
+  if (explainer.target && !explainer.target.isConnected) explainHide();
+  if (focused >= 0) focusables()[focused]?.focus({ preventScroll: true });
 }
 
 // ── chrome ────────────────────────────────────────────────────────────────
@@ -1974,13 +2423,58 @@ function positionThumb() {
   thumb.style.transform = `translateX(${active.offsetLeft - 2}px)`;
 }
 
+// ── title ─────────────────────────────────────────────────────────────────
+
+/** Whether a Claude or Codex entry of the provider snapshot is signed in. A
+    reading held through a hiccup still counts; a sign-in that lapsed doesn't. */
+function providerConnected(p) {
+  return Boolean(p) && !p.needs_sign_in && (['ok', 'available'].includes(p.status) || Boolean(p.plan));
+}
+
+/** Every connected provider's plan, then one email:
+    "Cursor Ultra · Claude Max 20x · Codex Plus · you@example.com". */
+function brandSubtitle() {
+  const cycle = state.cycle;
+  const parts = [];
+  if (cycle) parts.push(cycle.plan && cycle.plan !== 'Unknown' ? `Cursor ${cycle.plan}` : 'Cursor');
+  const connected = [];
+  for (const [id, label] of [['claude', 'Claude'], ['codex', 'Codex']]) {
+    const p = state.providers?.providers?.find((entry) => entry.id === id);
+    if (!providerConnected(p)) continue;
+    connected.push(p);
+    const plan = String(p.plan || '').trim();
+    parts.push(!plan ? label : plan.toLowerCase().startsWith(label.toLowerCase()) ? plan
+      : `${label} ${plan.charAt(0).toUpperCase()}${plan.slice(1)}`);
+  }
+  const email = cycle?.email || connected.find((p) => p.email)?.email;
+  if (email) parts.push(email);
+  return parts.length ? parts.join(' · ') : 'Provider-reported usage';
+}
+
+/** The version beside the wordmark and in the window title: v051 for an
+    installed build, dev for a source run. Hidden when the main process
+    doesn't say. */
+async function paintVersion() {
+  let info = null;
+  try {
+    info = await window.hud.appVersion?.();
+  } catch { /* An older main process: no badge. */ }
+  const tag = info?.tag || (info?.version ? `v${info.version}` : '');
+  const badge = $('brandVersion');
+  if (badge) {
+    badge.textContent = tag;
+    badge.hidden = !tag;
+  }
+  if (tag) document.title = `TOKENMAXXING ${tag}`;
+}
+
 // ── data flow ─────────────────────────────────────────────────────────────
 
 function paintStatus() {
   const report = state.cycle;
   const age = known(report?.fetched_at) ? Date.now()/1000-report.fetched_at : Infinity;
   const stale = state.cycleError || report?.stale || age > 300;
-  $('brandSub').textContent = report ? `Cursor ${report.plan || ''}${report.email ? ` · ${report.email}` : ''}` : 'Provider-reported usage';
+  $('brandSub').textContent = brandSubtitle();
   $('statusEvents').textContent = report ? `${compact(report.events_fetched)} / ${compact(report.events_total)} events${report.events_complete ? '' : ' · incomplete'}` : '';
   if (state.fetching) setStatus('off','Refreshing Cursor data…');
   else if (state.cycleError) setStatus('now',`Cursor refresh failed · last snapshot ${relativeTime(report?.fetched_at)}`);
@@ -2008,8 +2502,8 @@ async function refreshCycle(force = false) {
     paintStatus();
     renderResets();
     renderChat();
-    if (state.overview && state.overview.since !== overviewSince()) refreshOverview();
-    else renderOverview();
+    // Cursor's row and chats come from this report.
+    renderOverview();
   }
 }
 
@@ -2157,6 +2651,8 @@ async function boot() {
   const { platform, alwaysOnTop, openSmsSetup, openSessions } = await window.hud.windowState();
   document.body.classList.toggle('is-mac', platform === 'darwin');
   document.body.classList.toggle('is-win', platform === 'win32');
+  paintVersion();
+  installExplain();
   syncCaptionInset();
   window.addEventListener('resize', syncCaptionInset);
   navigator.windowControlsOverlay?.addEventListener?.('geometrychange', syncCaptionInset);
@@ -2206,9 +2702,8 @@ async function boot() {
     if (['active','latest'].includes(saved.follow)) state.sessionFollow = saved.follow;
   } catch { /* Invalid preference falls back to Auto. */ }
   try {
-    const range = localStorage.getItem('overviewRange');
-    if (OV_RANGES.some(([id]) => id === range)) state.overviewRange = range;
-  } catch { /* The Overview opens on this cycle. */ }
+    state.overviewRange = savedRange(localStorage.getItem('overviewRange'));
+  } catch { /* The Overview opens on 30 days. */ }
   // Codex is followed through a Windows accessibility helper; Claude Code
   // reports its own open session through the status line on any platform.
   state.activeChatSupported = platform === 'win32';
@@ -2290,7 +2785,8 @@ async function boot() {
     /* no cache yet */
   }
 
-  refreshOverview();
+  // The range on screen first, then the other one, so the first switch is instant too.
+  refreshOverview().then(prefetchOverview);
   await refreshLocal();
   refreshProviders(false);
   paintStatus();
@@ -2300,7 +2796,7 @@ async function boot() {
   setInterval(() => refreshProviders(false), POLL.providers);
   setInterval(refreshLocal, POLL.local);
   setInterval(() => refreshCycle(false), POLL.cycle);
-  setInterval(refreshOverview, POLL.overview);
+  setInterval(() => refreshOverview(), POLL.overview);
   if (openSmsSetup) { selectView('resets'); $('btnSms').click(); }
   else if (openSessions) selectView('chat');
 }

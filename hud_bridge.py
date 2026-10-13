@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import multiprocessing
 import time
 import sys
 import threading
@@ -21,6 +22,7 @@ import traceback
 from datetime import datetime
 
 import cursor_usage as cu
+import ledger
 import overview_stats
 import reset_schedule as rs
 import provider_usage as pu
@@ -234,23 +236,37 @@ def cmd_alert_settings() -> dict:
 
 
 PLAN_PRICES = {"claude": 200, "codex": 20}
+EARLIEST_SINCE = 946684800  # 2000-01-01
 
 
 def cmd_overview(since: float | None = None) -> dict:
-    """Cycle totals from local agent logs, plus the monthly plan prices."""
-    since = since if isinstance(since, (int, float)) and since > 0 else time.time() - 30 * 86400
-    # Cursor's minutes come from the local store every refresh adds to, so a
-    # refresh that fails partway never drops them from your time.
-    stats = overview_stats.overview(since, cursor_minutes=cu.read_activity_minutes())
+    """Range totals from the ledger, plus the monthly plan prices. Only a
+    query: the logs are read in the background (see ledger.start)."""
+    if not _number(since) or since <= 0:
+        since = time.time() - 30 * 86400
+    # Nothing an agent logged is older than this, and Windows cannot place
+    # local midnights before 1970.
+    since = max(since, EARLIEST_SINCE)
+    ledger.start()
+    # Cursor's events and minutes are the ledger's for the account signed in
+    # now; every refresh adds to them, so one that fails partway drops nothing.
+    stats = overview_stats.overview(since, cursor_account=cu.current_account())
     prices = rs.load_config().get("plan_prices") or {}
     stats["plan_prices"] = {key: prices.get(key, default) for key, default in PLAN_PRICES.items()}
     return stats
 
 
-def cmd_overview_progress() -> dict | None:
-    """How far an `overview` still reading the agent logs has got, in bytes;
-    None when none is. Only a first read of every log is slow enough to show."""
+def cmd_overview_progress() -> dict:
+    """How far reading every agent log into the ledger has got, in bytes;
+    done once every log is in. Only a first run is slow enough to show."""
+    ledger.start()
     return overview_stats.progress()
+
+
+def cmd_focus_record(spans: list | None = None) -> dict:
+    """Store spans an AI app had the focus: [{"app", "start", "end"}] in epoch
+    seconds. Sending a span again, or the one still growing, changes nothing."""
+    return {"stored": ledger.default().record_focus(spans)}
 
 
 def cmd_set_plan_prices(prices: dict) -> dict:
@@ -283,6 +299,7 @@ def cmd_paths() -> dict:
         "hud_dir": str(cu.hud_dir()),
         "config": str(rs.config_path()),
         "cache": str(cu.cache_path()),
+        "ledger": str(ledger.db_path()),
     }
 
 
@@ -304,6 +321,7 @@ COMMANDS = {
     "resets": cmd_resets,
     "overview": cmd_overview,
     "overview_progress": cmd_overview_progress,
+    "focus_record": cmd_focus_record,
     "set_plan_prices": cmd_set_plan_prices,
     "providers": cmd_providers,
     "due": cmd_due,
@@ -385,11 +403,34 @@ def main(argv: list[str] | None = None) -> int:
         if fn is None:
             sys.stderr.write(f"unknown command: {name}\n")
             return 2
-        json.dump(fn(), sys.stdout, default=_json_default, indent=2)
+        if name in ("overview", "overview_progress"):
+            # Nothing reads in the background of one command: read every log first.
+            ledger.default().ingest()
+        try:
+            json.dump(fn(), sys.stdout, default=_json_default, indent=2)
+        finally:
+            ledger.stop()
         sys.stdout.write("\n")
         return 0
-    return Bridge().serve()
+    # The ledger starts reading the agent logs at once, so the first Overview
+    # finds them read, or well on the way; opening it never holds up "ready".
+    threading.Thread(target=_start_ledger, name="ledger-start", daemon=True).start()
+    try:
+        return Bridge().serve()
+    finally:
+        # Workers still reading a first run's logs stop with the engine.
+        ledger.stop()
+
+
+def _start_ledger() -> None:
+    try:
+        ledger.start()
+    except Exception:  # an unopenable ledger is reported by the Overview that needs it
+        traceback.print_exc(file=sys.stderr)
 
 
 if __name__ == "__main__":
+    # A first run's logs are read on worker processes. In the frozen engine
+    # each starts as this executable, and this hands it its work.
+    multiprocessing.freeze_support()
     raise SystemExit(main())

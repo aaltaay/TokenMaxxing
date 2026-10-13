@@ -7,6 +7,7 @@ import os
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import hud_bridge as hb
@@ -180,6 +181,55 @@ class ResetsCommandTest(unittest.TestCase):
             self.assertEqual(hb.cmd_due()["events"],[])
 
 
+class LedgerCommandsTest(unittest.TestCase):
+    """The commands the ledger answers: the Overview, its progress, focus spans."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.logs = self.root / "logs"
+        for patcher in (patch.dict(os.environ, {"TOKEN_HUD_DIR": str(self.root / "hud")}),
+                        patch.object(hb.ledger.su, "session_root", lambda provider: self.logs / provider),
+                        # No background thread in a test: each one reads when it says so.
+                        patch.object(hb.ledger, "start"),
+                        patch.object(hb.cu, "current_account", return_value=None)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(hb.ledger.close)
+
+    def test_the_overview_is_a_query_with_plan_prices(self):
+        log = self.logs / "claude" / "p" / "a.jsonl"
+        log.parent.mkdir(parents=True)
+        log.write_text(json.dumps({"type": "assistant", "timestamp": "2026-09-19T12:00:00Z", "message": {
+            "id": "a", "model": "claude-opus-5", "usage": {"input_tokens": 1, "output_tokens": 2}}}) + "\n")
+        hb.ledger.default().ingest(parallel=False)
+        data = hb.cmd_overview(since=1789000000)
+        hb.ledger.start.assert_called()
+        self.assertEqual(data["providers"]["claude"]["tokens"]["output"], 2)
+        self.assertEqual(set(data["plan_prices"]), set(hb.PLAN_PRICES))
+        self.assertIsNone(data["cursor"])
+        self.assertTrue(data["backfill"]["done"])
+        self.assertEqual(data["db"]["path"], str(hb.ledger.db_path()))
+        # Nonsense ranges fall back to the last 30 days.
+        for since in (None, True, "1", -5, float("nan")):
+            self.assertGreater(hb.cmd_overview(since=since)["since"], time.time() - 31 * 86400)
+
+    def test_progress_says_how_far_the_backfill_has_got(self):
+        progress = hb.cmd_overview_progress()
+        self.assertEqual(set(progress), {"done", "read_bytes", "total_bytes", "complete_from", "read", "total"})
+
+    def test_focus_spans_are_stored_once_and_bad_ones_dropped(self):
+        now = time.time()
+        spans = [{"app": "claude", "start": now - 120, "end": now - 60}, {"app": "nope", "start": now - 120, "end": now}]
+        self.assertEqual(hb.cmd_focus_record(spans=spans), {"stored": 1})
+        self.assertEqual(hb.cmd_focus_record(spans=spans[:1]), {"stored": 1})
+        self.assertEqual(hb.cmd_focus_record(), {"stored": 0})
+        focus = hb.cmd_overview(since=now - 3600)["focus"]
+        self.assertEqual(focus["apps"], [{"id": "claude", "label": "Claude", "hours": round(60 / 3600, 2)}])
+
+    def test_the_ledger_is_among_the_paths(self):
+        self.assertEqual(hb.cmd_paths()["ledger"], str(self.root / "hud" / "tokenmaxxing.db"))
 
 
 if __name__ == "__main__":
