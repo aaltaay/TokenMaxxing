@@ -2,12 +2,18 @@
 
 // The app's own version and updates, in the notifications panel. The main
 // process owns every decision (updates.js); this only draws its view and sends
-// the click back.
+// the click back. A downloaded update lists what it brings under the ready row,
+// and What's new reopens the card for this version (whats-new.js).
 (() => {
   const label = document.getElementById('updateStatus');
   const button = document.getElementById('btnUpdate');
   const later = document.getElementById('btnUpdateLater');
+  const whatsNew = document.getElementById('btnWhatsNew');
+  const notesBox = document.getElementById('updateNotes');
+  const notesTitle = document.getElementById('updateNotesTitle');
+  const notesList = document.getElementById('updateNotesList');
   let state = {};
+  let whatsNewAvailable = false;
 
   function message(s) {
     const installed = s.installed || 'This version';
@@ -38,6 +44,26 @@
       : state.status === 'failed' ? (state.failedStage === 'download' ? 'Resume' : 'Retry')
         : 'Check for updates';
     later.hidden = state.status !== 'ready' || Boolean(state.dismissed);
+    paintNotes();
+    paintWhatsNew();
+  }
+
+  function paintNotes() {
+    const notes = state.status === 'ready' && state.notes && typeof state.notes === 'object' ? state.notes : null;
+    notesBox.hidden = !notes;
+    if (!notes) {
+      notesList.replaceChildren();
+      return;
+    }
+    const count = !notes.loading && Array.isArray(notes.releases) ? notes.releases.length : 0;
+    // The tags are listed right below; the heading is a kicker, set in capitals.
+    notesTitle.textContent = count > 1 ? `What these ${count} releases bring` : 'What this update brings';
+    notesList.replaceChildren(window.renderReleaseNotes(notes));
+  }
+
+  // The ready row already lists the notes, so What's new steps aside for Restart to update.
+  function paintWhatsNew() {
+    whatsNew.hidden = !whatsNewAvailable || ['ready', 'installing'].includes(state.status);
   }
 
   button.addEventListener('click', async () => {
@@ -52,6 +78,13 @@
   later.addEventListener('click', async () => {
     try { paint(await window.hud.laterUpdate()); } catch {}
   });
+  whatsNew.addEventListener('click', () => { window.hud.openWhatsNew().catch(() => {}); });
+  const takeWhatsNew = view => {
+    whatsNewAvailable = Boolean(view && view.schema_version === 1 && view.available);
+    paintWhatsNew();
+  };
+  window.hud.on('whatsNew', takeWhatsNew);
+  window.hud.whatsNewStatus().then(takeWhatsNew).catch(() => {});
   window.hud.on('updateStatus', paint);
   window.hud.updateStatus().then(paint).catch(() => paint({status: 'failed', failedStage: 'check'}));
 })();

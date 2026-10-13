@@ -9,11 +9,15 @@ const { ResetAttention } = require('./reset-attention');
 const { SmsAlerts } = require('./sms-alerts');
 const { Updates } = require('./updates');
 const { createUpdateLogger } = require('./update-log');
-const { UPDATE_CHECK_ENV, updateGate } = require('./update-policy');
+const { UPDATE_CHECK_ENV, displayTag, updateGate } = require('./update-policy');
+const { isReleaseLink } = require('./release-notes');
+const { createNotesSource } = require('./release-notes-source');
+const { createWhatsNew } = require('./whats-new');
 const { ActiveChat } = require('./active-chat');
 const activeChat = new ActiveChat({script: app.isPackaged
   ? path.join(process.resourcesPath, 'active-chat.ps1') : path.join(__dirname, 'active-chat.ps1')});
 let updates = null;
+let whatsNew = null;
 let sms = null;
 let smsQueue = Promise.resolve();
 function sendSms(body) {
@@ -308,6 +312,11 @@ ipcMain.handle('updates:status', () => updates?.view);
 ipcMain.handle('updates:check', () => { void updates?.check('manual'); return updates?.view; });
 ipcMain.handle('updates:install', async () => (await updates?.install()) || false);
 ipcMain.handle('updates:later', () => updates?.later());
+ipcMain.handle('whatsnew:status', () => whatsNew?.view);
+ipcMain.handle('whatsnew:open', () => whatsNew?.openRecent());
+ipcMain.handle('whatsnew:close', () => whatsNew?.close());
+// Release notes link only to this repo's release and PR pages.
+ipcMain.handle('release:open-link', (_event, url) => (isReleaseLink(url) ? shell.openExternal(url).then(() => true) : false));
 ipcMain.handle('reset:preview', previewAlert);
 ipcMain.handle('reset:status', () => attention.active);
 ipcMain.handle('reset:dismiss', () => attention.dismiss());
@@ -364,11 +373,14 @@ ipcMain.handle('win:attention', () => {
 
 // ── updates ───────────────────────────────────────────────────────────────
 // Every merge to main is a vNNN GitHub Release; updates.js finds it, downloads
-// it and, on the user's click, installs it. Logged to update.log in the app's
-// logs folder.
+// it and, on the user's click, installs it. Its release notes come from the same
+// Releases (release-notes-source.js, cached in userData): the ready row lists
+// what an update brings, and the first launch of a new version opens the What's
+// new card (whats-new.js). Logged to update.log in the app's logs folder.
 
-function createUpdates() {
-  const logger = createUpdateLogger({ prefix: '[update]', dir: () => { try { return app.getPath('logs'); } catch { return ''; } } });
+const userDataDir = () => { try { return app.getPath('userData'); } catch { return ''; } };
+
+function createUpdates({ logger, notesSource }) {
   const gate = updateGate({ isPackaged: app.isPackaged, platform: process.platform, setting: process.env[UPDATE_CHECK_ENV] });
   let updater = null;
   if (gate.updater) {
@@ -381,6 +393,7 @@ function createUpdates() {
   return new Updates({
     updater, gate, version: app.getVersion(), logger,
     fetch: (url, init) => net.fetch(url, init),
+    notesSource,
     publish: view => send('updates:status', view),
     setProgress: value => { if (win && !win.isDestroyed()) win.setProgressBar(value); },
     // Flashes the taskbar button until the window is focused; the bell carries the buttons.
@@ -405,12 +418,19 @@ if (!app.requestSingleInstanceLock()) {
   nativeTheme.themeSource = 'dark';
 
   app.whenReady().then(() => {
-    updates = createUpdates();
+    const logger = createUpdateLogger({ prefix: '[update]', dir: () => { try { return app.getPath('logs'); } catch { return ''; } } });
+    const notesSource = createNotesSource({ fetch: (url, init) => net.fetch(url, init), dir: userDataDir, logger });
+    updates = createUpdates({ logger, notesSource });
+    whatsNew = createWhatsNew({
+      notesSource, dir: userDataDir, installedTag: displayTag(app.getVersion()), logger,
+      publish: view => send('whatsnew:status', view),
+    });
     sms = new SmsAlerts({filename: path.join(app.getPath('userData'), 'twilio-credentials.enc'), storage: safeStorage});
     createWindow();
     startBridge();
     activeChat.start();
     updates.start();
+    void whatsNew.start();
     watchExistingConnections();
     alertPoll = setInterval(pollResetAlerts, 5000);
     app.on('activate', () => {

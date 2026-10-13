@@ -17,7 +17,7 @@ const URL_HREF = 'https://github.com/aaltaay/TokenMaxxing/releases/download/v042
  * plans the download the way the real one does, and on downloadUpdate() reports
  * downloaded only if our hand-off left the right file in its pending cache.
  */
-function setup({latest = '3.0.42', gate = ON, stopEngine, fetch} = {}) {
+function setup({latest = '3.0.42', gate = ON, stopEngine, fetch, notesSource} = {}) {
   const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tm-updates-'));
   const updater = new EventEmitter();
   const calls = {checks: 0, installs: [], restarts: 0, attention: 0};
@@ -43,7 +43,7 @@ function setup({latest = '3.0.42', gate = ON, stopEngine, fetch} = {}) {
   const views = [];
   const progress = [];
   const updates = new Updates({
-    updater, gate, version: '3.0.40', sleep: async () => {},
+    updater, gate, version: '3.0.40', sleep: async () => {}, notesSource,
     fetch: fetch || (async (_url, init) => {
       const [start, end] = /bytes=(\d+)-(\d+)/.exec(init.headers.Range).slice(1).map(Number);
       const slice = INSTALLER.subarray(start, end + 1);
@@ -161,4 +161,56 @@ test('a download that stops keeps its place and the next check resumes it', asyn
   fail = false;
   assert.equal((await s.updates.check('manual')).status, 'ready');
   s.cleanup();
+});
+
+test('the ready release carries the notes of everything it brings, loaded once', async () => {
+  const loads = [];
+  let answer;
+  const notesSource = {load: range => {
+    loads.push(range);
+    return new Promise(resolve => { answer = resolve; });
+  }};
+  const s = setup({notesSource});
+  const view = await s.updates.check('launch');
+  assert.equal(view.status, 'ready');
+  assert.deepEqual(loads, [{after: 'v040', through: 'v042'}]);
+  assert.equal(view.notes.loading, true);
+  answer({loading: false, error: null, releases: [{tag: 'v042'}, {tag: 'v041'}], more: 0, older_unlisted: false});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(s.views.at(-1).notes.releases.map(r => r.tag), ['v042', 'v041']);
+  // Re-checks and Later do not fetch the notes again.
+  await s.updates.check('manual');
+  s.updates.later();
+  assert.equal(loads.length, 1);
+  assert.equal(s.updates.view.notes.releases.length, 2);
+  s.cleanup();
+});
+
+test('notes that fail to load say so and try again once the release has downloaded', async () => {
+  let attempts = 0;
+  const failing = setup({notesSource: {load: async () => {
+    attempts++;
+    if (attempts === 1) throw new Error('offline');
+    return {loading: false, error: null, releases: [{tag: 'v042'}], more: 0, older_unlisted: false};
+  }}});
+  // The first load fails at once, before the download finishes; 'downloaded' loads again.
+  const helper = failing.updater.getOrCreateDownloadHelper;
+  let seenError = '';
+  failing.updater.getOrCreateDownloadHelper = async () => {
+    await new Promise(resolve => setImmediate(resolve));
+    seenError = failing.updates.view.notes.error;
+    return helper();
+  };
+  await failing.updates.check('launch');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(seenError, /could not be loaded: offline/);
+  assert.equal(attempts, 2);
+  assert.deepEqual(failing.updates.view.notes.releases, [{tag: 'v042'}]);
+  failing.cleanup();
+  const loads = [];
+  const current = setup({latest: null, notesSource: {load: async range => { loads.push(range); }}});
+  // Up to date: no release on offer, so no notes are asked for.
+  assert.equal((await current.updates.check('launch')).notes, null);
+  assert.deepEqual(loads, []);
+  current.cleanup();
 });

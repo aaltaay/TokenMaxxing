@@ -22,6 +22,10 @@ contextBridge.exposeInMainWorld('hud', {
   checkUpdates: () => ipcRenderer.invoke('updates:check'),
   installUpdate: () => ipcRenderer.invoke('updates:install'),
   laterUpdate: () => ipcRenderer.invoke('updates:later'),
+  whatsNewStatus: () => ipcRenderer.invoke('whatsnew:status'),
+  openWhatsNew: () => ipcRenderer.invoke('whatsnew:open'),
+  closeWhatsNew: () => ipcRenderer.invoke('whatsnew:close'),
+  openReleaseLink: (url) => ipcRenderer.invoke('release:open-link', url),
   previewResetAlert: () => ipcRenderer.invoke('reset:preview'),
   resetAlertStatus: () => ipcRenderer.invoke('reset:status'),
   dismissResetAlert: () => ipcRenderer.invoke('reset:dismiss'),
@@ -44,7 +48,7 @@ contextBridge.exposeInMainWorld('hud', {
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
 
   on: (event, handler) => {
-    const channels = { ready: 'engine:ready', down: 'engine:down', fatal: 'engine:fatal', link: 'provider:link', connectionsChanged: 'providers:changed', resetAlert: 'reset:alert', smsStatus: 'sms:status' };
+    const channels = { ready: 'engine:ready', down: 'engine:down', fatal: 'engine:fatal', link: 'provider:link', connectionsChanged: 'providers:changed', resetAlert: 'reset:alert', smsStatus: 'sms:status', whatsNew: 'whatsnew:status' };
     const channel = event === 'updateStatus' ? 'updates:status' : channels[event];
     if (!channel) throw new Error(`unknown event: ${event}`);
     const listener = (_e, payload) => handler(payload);

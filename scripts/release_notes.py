@@ -6,7 +6,8 @@ the workflow looks up the merged PR and passes its title and body as the
 message; a direct push passes the commit message. The PR template's `## What`
 opens with a sentence or three for the user, which becomes the Release body: a
 readable "What's new" section, the installer text, and one hidden
-machine-readable line for a future in-app What's new view:
+machine-readable line the app reads (app/release-notes.js) for the notes under
+Restart to update and the What's new card:
 
     <!-- tokenmaxxing-release-notes {"schema_version": 1, "tag": "v042", ...} -->
 
