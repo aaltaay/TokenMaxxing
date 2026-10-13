@@ -278,3 +278,24 @@ test('expired Claude login is explicitly unavailable', () => {
   assert.equal(run(`providerBands().find(p=>p.id==='claude').display`),'Unavailable');
   assert.equal(run(`providerBands().find(p=>p.id==='claude').hint`),'Sign-in expired');
 });
+
+test('a slow first overview read says how far it has got, and a failed one says why', async () => {
+  const run = renderer();
+  run(`
+    el = (tag, attrs = {}, children = []) => ({text: [attrs.text, ...[].concat(children).filter(Boolean).map(c => c.text)].filter(Boolean).join(' ')});
+    let overviewRenders = 0;
+    renderOverview = () => { overviewRenders += 1; };
+    window.hud.call = async (cmd) => cmd === 'overview_progress' ? {read: 1.5e9, total: 6e9} : null;
+    state.overviewFetching = true;
+  `);
+  assert.equal(run(`overviewReading().text`), 'Reading your agent logs…');
+  await run(`watchOverviewRead()`);
+  assert.equal(run(`overviewRenders`), 1);
+  assert.equal(run(`overviewReading().text`),
+    'Reading your agent logs… 25% of 6.0 GB. The first read takes a minute or two; after that, seconds.');
+  // An earlier attempt's error waits while a new read is under way.
+  run(`state.overviewError = 'overview timed out'`);
+  assert.match(run(`overviewReading().text`), /^Reading your agent logs… 25%/);
+  run(`state.overviewFetching = false`);
+  assert.equal(run(`overviewReading().text`), 'overview timed out');
+});

@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,32 @@ def prompt(offset, text='do the thing', **extra):
     return {'type': 'user', 'timestamp': stamp(offset), **extra, 'message': {'content': text}}
 
 
+def codex_event(offset, kind, **payload):
+    return {'type': 'event_msg', 'timestamp': stamp(offset), 'payload': {'type': kind, **payload}}
+
+
+def codex_tokens(offset, total, last):
+    fields = ('input_tokens', 'cached_input_tokens', 'output_tokens')
+    return codex_event(offset, 'token_count', info={'total_token_usage': dict(zip(fields, total)),
+                                                    'last_token_usage': dict(zip(fields, last))})
+
+
+def turn(offset, msg_id, *tools):
+    """An assistant turn whose tool calls carry ids, as real logs' do."""
+    return {**assistant(offset, msg_id), 'message': {
+        'id': msg_id, 'model': 'claude-opus-5', 'usage': USAGE,
+        'content': [{'type': 'tool_use', 'id': tool_id, 'name': name} for tool_id, name in tools]}}
+
+
+def restart():
+    """What a fresh engine starts with: nothing in memory, the file on disk."""
+    for thread in threading.enumerate():
+        if thread.name == 'overview-save':
+            thread.join()
+    ov._facts.clear()
+    ov._disk.update(loaded=False, dirty=False, unsaved=0.0, saved_at=0.0)
+
+
 class OverviewStatsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -43,7 +70,11 @@ class OverviewStatsTest(unittest.TestCase):
         patcher = patch.object(ov.su, 'session_root', lambda p: self.claude if p == 'claude' else self.codex)
         patcher.start()
         self.addCleanup(patcher.stop)
-        ov._facts.clear()
+        env = patch.dict(os.environ, {'TOKEN_HUD_DIR': str(root / 'hud')})
+        env.start()
+        self.addCleanup(env.stop)
+        restart()
+        self.addCleanup(restart)
 
     def run_overview(self, since=BASE - 10, **kwargs):
         return ov.overview(since, now=kwargs.pop('now', BASE + 3600), **kwargs)
@@ -208,6 +239,185 @@ class OverviewStatsTest(unittest.TestCase):
         write(self.claude / 'p' / 'a.jsonl', [assistant(0, 'x'), assistant(60, 'y')])
         self.run_overview()
         with patch.object(ov, '_read', side_effect=AssertionError('reread')):
+            self.run_overview()
+
+    # ── the facts on disk ──
+
+    def write_logs(self):
+        """A Claude session with a subagent and a rewound turn, and a Codex
+        session whose token counters only make sense read in order."""
+        write(self.claude / 'p' / 'main.jsonl', [
+            prompt(0, uuid='u1'), turn(60, 'a', ('t0', 'Bash'), ('t2', 'Edit')),
+            prompt(200, uuid='u2'), turn(260, 'b', ('t1', 'Read')), turn(60, 'a', ('t0', 'Bash'), ('t2', 'Edit')),
+        ])
+        write(self.claude / 'p' / 'main' / 'subagents' / 'agent-1.jsonl', [assistant(100, 's1', ['Grep'])])
+        write(self.codex / '2026' / 'rollout.jsonl', [
+            {'type': 'turn_context', 'timestamp': stamp(0), 'payload': {'model': 'gpt-6-astra'}},
+            codex_event(5, 'user_message'), codex_event(30, 'agent_message'),
+            codex_tokens(30, (100, 20, 10), (100, 20, 10)),
+            {'type': 'response_item', 'timestamp': stamp(45), 'payload': {'type': 'function_call', 'name': 'shell'}},
+        ])
+
+    def grow_logs(self):
+        """What the logs gain later: ids, reply times and counters from before
+        decide how the new lines count."""
+        write(self.claude / 'p' / 'main.jsonl', [
+            # Logged again by a rewind: counted already, before the restart.
+            turn(60, 'a', ('t0', 'Bash'), ('t2', 'Edit')), turn(260, 'b', ('t1', 'Read')),
+            # 40 s after the last reply: thinking time only the saved reply time knows.
+            prompt(300, uuid='u3'), turn(330, 'c', ('t3', 'Write')),
+        ], mode='a')
+        write(self.codex / '2026' / 'rollout.jsonl', [
+            # The same cumulative counters again, then the next request.
+            codex_tokens(50, (100, 20, 10), (100, 20, 10)),
+            codex_event(60, 'user_message'),
+            codex_tokens(90, (250, 50, 30), (150, 30, 20)),
+        ], mode='a')
+
+    def full_read(self):
+        """The overview a fresh engine gives with no saved facts at all."""
+        restart()
+        ov.cache_path().unlink(missing_ok=True)
+        result = self.run_overview()
+        restart()
+        return result
+
+    def test_saved_facts_come_back_exactly_as_they_were(self):
+        self.write_logs()
+        self.run_overview()
+        self.assertEqual(len(ov._facts), 3)
+        for facts in ov._facts.values():
+            # Through JSON, as the file holds them: tuples stay tuples, ids stay ids.
+            self.assertEqual(ov._revive(json.loads(json.dumps(ov._saveable(facts)))), facts)
+        claude = ov._facts[('claude', str(self.claude / 'p' / 'main.jsonl'))]
+        self.assertEqual(len(claude['seen']), 7)
+        self.assertEqual(ov._facts[('codex', str(self.codex / '2026' / 'rollout.jsonl'))]['previous'], (100, 20, 10))
+        before = {key: dict(facts) for key, facts in ov._facts.items()}
+        ov._save()
+        restart()
+        with patch.object(ov, '_read', side_effect=AssertionError('reread a saved log')):
+            self.run_overview()
+        self.assertEqual(ov._facts, before)
+
+    def test_totals_match_cold_warm_and_continued_from_a_saved_offset(self):
+        self.write_logs()
+        cold = self.run_overview()
+        ov._save()
+        restart()
+        warm = self.run_overview()
+        self.assertEqual(warm, cold)
+        self.assertEqual(cold['providers']['codex']['tokens']['output'], 10)
+
+        # A fresh engine picks up where the saved offsets end, and counts what
+        # the logs gained exactly as reading them whole would.
+        ov._save()
+        restart()
+        self.grow_logs()
+        continued = self.run_overview()
+        self.assertEqual(continued, self.full_read())
+        # Three Claude prompts and two Codex ones; Bash, Edit, Read, Grep, Write and shell.
+        self.assertEqual((continued['prompts'], continued['tool_calls']), (5, 6))
+        self.assertEqual(continued['think_hours'], round((200 - 60 + 300 - 260 + 60 - 30) / 3600, 2))
+        codex = continued['providers']['codex']
+        self.assertEqual((codex['tokens']['output'], codex['unpriced_requests']), (30, 0))
+        self.assertEqual(continued['providers']['claude']['tokens']['output'], 40)
+
+    def test_a_corrupt_or_foreign_file_reads_every_log_afresh(self):
+        self.write_logs()
+        expected = self.full_read()
+        self.run_overview()
+        ov._disk['dirty'] = True
+        ov._save()
+        good = ov.cache_path().read_text(encoding='utf-8')
+        saved = json.loads(good)
+        broken = {
+            'truncated': good[:len(good) // 2],
+            'not json': 'garbage',
+            'another layout': json.dumps({**saved, 'version': ov.CACHE_VERSION + 1}),
+            'other readers': json.dumps({**saved, 'readers': 'made by other code'}),
+            'not a list': json.dumps({**saved, 'logs': {'a': 1}}),
+        }
+        for label, text in broken.items():
+            with self.subTest(label):
+                restart()
+                ov.cache_path().write_text(text, encoding='utf-8')
+                with patch.object(ov, '_read', wraps=ov._read) as read:
+                    self.assertEqual(self.run_overview(), expected)
+                self.assertEqual(read.call_count, 3)
+
+    def test_a_malformed_entry_rereads_only_its_own_log(self):
+        self.write_logs()
+        expected = self.full_read()
+        self.run_overview()
+        ov._disk['dirty'] = True
+        ov._save()
+        saved = json.loads(ov.cache_path().read_text(encoding='utf-8'))
+        breakages = (
+            lambda f: f['requests'][0].__setitem__(2, 'many'),
+            lambda f: f.__setitem__('seen', 'not base64!'),
+            lambda f: f.__setitem__('offset', -1),
+            lambda f: f['tools'].append([1, None]),
+            lambda f: f.pop('intervals'),
+        )
+        for index, breakage in enumerate(breakages):
+            with self.subTest(index):
+                entries = json.loads(json.dumps(saved))
+                main = next(e for e in entries['logs'] if e[1].endswith('main.jsonl'))
+                breakage(main[2])
+                restart()
+                ov.cache_path().write_text(json.dumps(entries), encoding='utf-8')
+                with patch.object(ov, '_read', wraps=ov._read) as read:
+                    self.assertEqual(self.run_overview(), expected)
+                self.assertEqual([call.args[0].name for call in read.call_args_list], ['main.jsonl'])
+
+    def test_logs_too_old_for_any_range_are_not_kept_on_disk(self):
+        self.write_logs()
+        old = self.claude / 'p' / 'old.jsonl'
+        write(old, [assistant(-50 * 86400, 'z')])
+        os.utime(old, (BASE - 50 * 86400, BASE - 50 * 86400))
+        self.run_overview(since=BASE - 60 * 86400, now=BASE - 20 * 86400)
+        self.assertIn(('claude', str(old)), ov._facts)
+        self.run_overview(now=BASE + 3600)
+        ov._save()
+        logs = [path for _, path, _ in json.loads(ov.cache_path().read_text(encoding='utf-8'))['logs']]
+        self.assertEqual(len(logs), 3)
+        self.assertNotIn(str(old), logs)
+
+    def test_the_readers_fingerprint_follows_prices_and_rules(self):
+        same = ov._readers()
+        self.assertEqual(ov._readers(), same)
+        with patch.dict(ov.sc.CLAUDE_RATES, {'claude-opus-5': (1.0, 0.1, 1.25, 5.0)}):
+            self.assertNotEqual(ov._readers(), same)
+        with patch.object(ov, 'IDLE_GAP', ov.IDLE_GAP + 1):
+            self.assertNotEqual(ov._readers(), same)
+        with patch.object(ov, 'TOOL_GROUPS', ov.TOOL_GROUPS + (('Plan', ('exitplanmode',)),)):
+            self.assertNotEqual(ov._readers(), same)
+        self.assertEqual(ov._readers(), same)
+        # Ranges and the live caches have no say in it.
+        self.run_overview()
+        with patch.object(ov, 'SITTING_GAP', 1):
+            self.assertEqual(ov._readers(), same)
+
+    def test_a_long_first_read_saves_as_it_goes_and_reports_progress(self):
+        self.write_logs()
+        seen = []
+        real = ov.file_facts
+
+        def file_facts(provider, path, stat=None):
+            seen.append(ov.progress())
+            ov._disk['unsaved'] = ov.CHECKPOINT_EVERY  # as if each log took that long
+            return real(provider, path, stat)
+        self.assertIsNone(ov.progress())
+        with patch.object(ov, 'file_facts', file_facts), patch.object(ov, '_save', wraps=ov._save) as save:
+            self.run_overview()
+        total = sum(path.stat().st_size for path in self.claude.rglob('*.jsonl')) + \
+            sum(path.stat().st_size for path in self.codex.rglob('*.jsonl'))
+        self.assertEqual(seen[0], {'read': 0, 'total': total})
+        self.assertGreater(seen[-1]['read'], 0)
+        self.assertIsNone(ov.progress())
+        self.assertGreaterEqual(save.call_count, 3)
+        restart()
+        with patch.object(ov, '_read', side_effect=AssertionError('reread a saved log')):
             self.run_overview()
 
 

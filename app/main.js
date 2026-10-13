@@ -300,8 +300,11 @@ function startBridge() {
 ipcMain.handle('engine:call', async (_event, cmd, args) => {
   if (!bridge) throw new Error('engine not started');
   if (cmd === 'sessions') args = {...args, active_title: activeChat.currentTitle(args?.provider === 'claude' ? 'claude' : 'codex')};
-  // The cycle fetch pages the dashboard and can legitimately run long.
-  const timeout = cmd === 'cycle' ? 180000 : cmd === 'overview' ? 120000 : cmd === 'providers' ? 45000 : 30000;
+  // The cycle fetch pages the dashboard and can legitimately run long. The
+  // overview reads only what the agent logs gained, except on a first read
+  // of every log (gigabytes, a minute or two), which the renderer shows
+  // progress for; giving up on that sooner would only throw the answer away.
+  const timeout = cmd === 'cycle' ? 180000 : cmd === 'overview' ? 600000 : cmd === 'providers' ? 45000 : 30000;
   return bridge.call(cmd, args || {}, timeout);
 });
 

@@ -42,6 +42,8 @@ const state = {
   overview: null,
   overviewError: null,
   overviewFetching: false,
+  // How far a slow first read of the agent logs has got: {read, total} bytes.
+  overviewRead: null,
   overviewRange: 'cycle',
   priceEditor: false,
   // What the bell badge reflects besides alerts: a waiting update and the
@@ -1485,17 +1487,45 @@ async function refreshOverview() {
   state.overviewFetching = true;
   const since = overviewSince();
   const range = state.overviewRange;
+  // Nearly every read takes well under a second; a first read of every log
+  // takes a minute or two, and the empty Overview says how far it has got.
+  const watch = setInterval(watchOverviewRead, 1000);
   try {
     state.overview = { ...await window.hud.call('overview', { since }), range };
     state.overviewError = null;
   } catch (err) {
     state.overviewError = engineMessage(err);
   } finally {
+    clearInterval(watch);
     state.overviewFetching = false;
+    state.overviewRead = null;
     renderOverview();
     // The range changed while the logs were being read.
     if (since !== overviewSince()) refreshOverview();
   }
+}
+
+async function watchOverviewRead() {
+  if (state.overview) return;
+  try {
+    state.overviewRead = await window.hud.call('overview_progress');
+  } catch {
+    return; // Only the progress line goes missing; the read itself carries on.
+  }
+  if (state.overviewFetching && !state.overview) renderOverview();
+}
+
+/** Until the first figures arrive: how far the read has got, or why it failed. */
+function overviewReading() {
+  if (state.overviewError && !state.overviewFetching) return el('div', { class: 'ov-loading', text: state.overviewError });
+  const read = state.overviewRead;
+  const total = read?.total > 0 ? read.total : null;
+  const size = total >= 1e9 ? `${(total / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(total / 1e6))} MB`;
+  return el('div', { class: 'ov-loading' }, [
+    el('div', { text: 'Reading your agent logs…' }),
+    total ? el('div', { class: 'ov-muted ov-gap', text: `${Math.min(99, Math.floor((100 * read.read) / total))}% of ${size}. `
+      + 'The first read takes a minute or two; after that, seconds.' }) : null,
+  ]);
 }
 
 function setOverviewRange(id) {
@@ -1872,7 +1902,7 @@ function renderOverview() {
   const host = $('overviewBody');
   const o = state.overview;
   if (!o) {
-    host.replaceChildren(overviewRanges(false), el('div', { class: 'ov-loading', text: state.overviewError || 'Reading your agent logs…' }));
+    host.replaceChildren(overviewRanges(false), overviewReading());
     return;
   }
   // Until the chosen range arrives, the last one stays up, dimmed.
