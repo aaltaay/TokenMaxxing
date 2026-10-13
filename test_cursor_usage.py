@@ -115,12 +115,22 @@ class PaginationTests(unittest.TestCase):
         self.assertFalse(result["events_complete"])
 
     def test_page_error_retains_partial_status(self):
-        pages = [{"totalUsageEventsCount": 2, "usageEventsDisplay": [{"id": 1}]}, RuntimeError("secret")]
-        with patch.object(cu, "dashboard_request", side_effect=pages):
+        pages = [{"totalUsageEventsCount": 2, "usageEventsDisplay": [{"id": 1}]}]
+        pages += [RuntimeError("secret")] * cu.EVENT_PAGE_ATTEMPTS
+        with patch.object(cu, "dashboard_request", side_effect=pages) as request:
             result = cu.fetch_events("unused", {})
+        self.assertEqual(request.call_count, 1 + cu.EVENT_PAGE_ATTEMPTS)
         self.assertEqual(len(result["events"]), 1)
         self.assertFalse(result["events_complete"])
         self.assertNotIn("secret", result["events_incomplete_reason"])
+
+    def test_a_dropped_page_is_asked_for_again(self):
+        pages = [{"totalUsageEventsCount": 2, "usageEventsDisplay": [{"id": 1}]}, OSError("TLS reset"),
+                 {"totalUsageEventsCount": 2, "usageEventsDisplay": [{"id": 2}]}]
+        with patch.object(cu, "dashboard_request", side_effect=pages):
+            result = cu.fetch_events("unused", {})
+        self.assertTrue(result["events_complete"])
+        self.assertEqual([row["id"] for row in result["events"]], [1, 2])
 
     def test_repeated_page_and_changing_count_are_rejected(self):
         first = {"totalUsageEventsCount": 3, "usageEventsDisplay": [{"id": 1}]}
@@ -146,7 +156,8 @@ class ReportTests(unittest.TestCase):
             db.touch()
             if cache is not None:
                 path.write_text(json.dumps(cache))
-            for name, value in (("cache_path", path), ("cursor_state_db", db),
+            self.activity = Path(directory) / "activity.json"
+            for name, value in (("cache_path", path), ("activity_path", self.activity), ("cursor_state_db", db),
                                 ("connect", MagicMock()), ("session_cookie", "unused"),
                                 ("access_token", None),
                                 ("chat_names", {}), ("cloud_agent_names", {})):
@@ -163,6 +174,7 @@ class ReportTests(unittest.TestCase):
             if events is not None:
                 stack.enter_context(patch.object(cu, "fetch_events", return_value=events))
             result = cu.fetch_cycle()
+            self.stored = json.loads(self.activity.read_text()) if self.activity.exists() else None
             return result, request.call_count
 
     def test_missing_source_values_are_not_fake_zeros_or_cycle_dates(self):
@@ -185,6 +197,16 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report["conversations"], [])
         self.assertIsNone(report["headless"]["n"])
         self.assertEqual(report["agg_input"], 0)
+
+    def test_partial_events_still_add_their_minutes_to_the_store(self):
+        summary = {"billingCycleStart": "2026-09-01T00:00:00Z", "billingCycleEnd": "2026-10-01T00:00:00Z"}
+        events = {"events": [{"model": "a", "timestamp": str(int(time.time() * 1000)), "isHeadless": False}],
+                  "events_total": 20, "events_complete": False,
+                  "events_incomplete_reason": "timeout", "events_pages": 1}
+        report, _ = self.fetch_mock_report(summary=summary, events=events)
+        self.assertNotIn("activity_minutes", report)
+        self.assertEqual(self.stored["email"], "test@example.com")
+        self.assertEqual(len(self.stored["minutes"]["interactive"]), 1)
 
     def test_recorded_zero_spend_does_not_fall_back(self):
         report, _ = self.fetch_mock_report(summary={"individualUsage": {"plan": {"breakdown": {"total": 99}}}},
@@ -274,6 +296,67 @@ class CacheValidationTests(unittest.TestCase):
         self.write_cache()
         self.identity.side_effect = sqlite3.OperationalError("database unavailable")
         self.assertIsNone(cu.read_cached_cycle())
+
+
+class ActivityStoreTests(unittest.TestCase):
+    """Cursor's activity minutes outlive any one refresh, so your time never
+    jumps when a refresh fails partway."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        root = Path(self.directory.name)
+        self.cache = root / "cycle-cache.json"
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.object(cu, "cache_path", return_value=self.cache))
+        self.stack.enter_context(patch.object(cu, "activity_path", return_value=root / "cursor-activity.json"))
+        self.identity = self.stack.enter_context(patch.object(
+            cu, "_current_cursor_identity", return_value=("test-session", "test@example.com")))
+        self.now = 1791900000
+
+    @staticmethod
+    def event(at, **extra):
+        return {"timestamp": str(int(at * 1000)), "isHeadless": False, **extra}
+
+    def test_a_partial_refresh_never_takes_minutes_away(self):
+        cu.remember_activity("test@example.com", [self.event(self.now - 600), self.event(self.now - 60)], now=self.now)
+        cu.remember_activity("Test@Example.com", [self.event(self.now - 60)], now=self.now)
+        self.assertEqual(cu.read_activity_minutes()["interactive"], [self.now - 600, self.now - 60])
+
+    def test_minutes_are_sorted_by_who_made_the_request(self):
+        cu.remember_activity("test@example.com", [self.event(self.now, conversationId="sand-subagent-1"),
+                                                  self.event(self.now - 120, isHeadless=True)], now=self.now)
+        self.assertEqual(cu.read_activity_minutes(), {"interactive": [], "headless": [self.now - 120],
+                                                      "subagent": [self.now]})
+
+    def test_minutes_older_than_any_range_are_forgotten(self):
+        old = self.now - cu.ACTIVITY_KEEP_S - 60
+        cu.remember_activity("test@example.com", [self.event(old), self.event(self.now)], now=self.now)
+        self.assertEqual(cu.read_activity_minutes()["interactive"], [self.now])
+
+    def test_another_accounts_minutes_are_never_shown_or_kept(self):
+        cu.remember_activity("previous@example.com", [self.event(self.now - 600)], now=self.now)
+        self.assertIsNone(cu.read_activity_minutes())
+        cu.remember_activity("test@example.com", [self.event(self.now)], now=self.now)
+        self.assertEqual(cu.read_activity_minutes()["interactive"], [self.now])
+
+    def test_signed_out_shows_no_minutes(self):
+        cu.remember_activity("test@example.com", [self.event(self.now)], now=self.now)
+        for identity in ((None, "test@example.com"), ("session", None)):
+            with self.subTest(identity=identity):
+                self.identity.return_value = identity
+                self.assertIsNone(cu.read_activity_minutes())
+        self.identity.side_effect = sqlite3.OperationalError("database unavailable")
+        self.assertIsNone(cu.read_activity_minutes())
+
+    def test_last_snapshot_seeds_the_store(self):
+        self.cache.write_text(json.dumps({"email": "test@example.com", "activity_minutes": {
+            "interactive": [self.now - 600], "headless": [], "subagent": []}}))
+        self.assertEqual(cu.read_activity_minutes()["interactive"], [self.now - 600])
+        cu.remember_activity("test@example.com", [self.event(self.now)], now=self.now)
+        self.cache.write_text(json.dumps({"email": "test@example.com"}))
+        self.assertEqual(cu.read_activity_minutes()["interactive"], [self.now - 600, self.now])
 
 
 class FetchCoordinationTests(unittest.TestCase):

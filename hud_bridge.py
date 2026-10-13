@@ -239,8 +239,9 @@ PLAN_PRICES = {"claude": 200, "codex": 20}
 def cmd_overview(since: float | None = None) -> dict:
     """Cycle totals from local agent logs, plus the monthly plan prices."""
     since = since if isinstance(since, (int, float)) and since > 0 else time.time() - 30 * 86400
-    cycle = cu.read_cached_cycle(allow_stale=True) or {}
-    stats = overview_stats.overview(since, cursor_minutes=cycle.get("activity_minutes"))
+    # Cursor's minutes come from the local store every refresh adds to, so a
+    # refresh that fails partway never drops them from your time.
+    stats = overview_stats.overview(since, cursor_minutes=cu.read_activity_minutes())
     prices = rs.load_config().get("plan_prices") or {}
     stats["plan_prices"] = {key: prices.get(key, default) for key, default in PLAN_PRICES.items()}
     return stats
