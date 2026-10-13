@@ -239,6 +239,13 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(provider["warning"], "limited")
         self.assertNotIn("needs_sign_in", provider)
 
+    def test_the_first_provider_to_answer_after_a_restart_keeps_the_others_saved_reading(self):
+        pu._remember_good("claude", self.ok_claude())
+        pu._last_good.clear()
+        pu._remember_good("codex", self.ok())
+        self.assertEqual(pu._saved_reading("claude")["windows"][0]["used_percent"], 12)
+        self.assertEqual(pu._saved_reading("codex")["windows"][0]["used_percent"], 4)
+
     @patch.object(pu, "_read_claude")
     @patch.object(pu, "_read_codex")
     def test_only_a_sign_in_failure_asks_to_reconnect(self, codex, claude):

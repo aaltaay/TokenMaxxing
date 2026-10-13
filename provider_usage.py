@@ -43,6 +43,9 @@ _fetch_lock = threading.Lock()
 _last_good: dict = {}
 _attempted: dict = {}
 _backoff_until: dict = {}
+# Codex and Claude are read on threads of their own; their saves of the last
+# good readings take turns, so neither overwrites the other's.
+_save_lock = threading.Lock()
 
 
 def _number(value):
@@ -370,15 +373,25 @@ def _saved_path():
     return hud_dir() / "provider-last-good.json"
 
 
-def _save_last_good():
-    try:
-        path = _saved_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(_last_good), encoding="utf-8")
-        temporary.replace(path)
-    except OSError:
-        pass
+def _remember_good(provider_id, result):
+    """Keep a reading that returned data, in memory and on disk. The file is
+    updated one provider at a time: after a restart, the provider that answers
+    first must not erase the other's saved reading before it is needed."""
+    with _save_lock:
+        _last_good[provider_id] = result
+        try:
+            path = _saved_path()
+            try:
+                saved = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                saved = {}
+            saved = {**(saved if isinstance(saved, dict) else {}), provider_id: result}
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(saved), encoding="utf-8")
+            temporary.replace(path)
+        except OSError:
+            pass
 
 
 def _saved_reading(provider_id):
@@ -434,8 +447,7 @@ def _fetch_one(provider_id, source, reader, force):
         _backoff_until[provider_id] = time.monotonic() + retry_after
     if result.get("status") == "ok":
         _backoff_until.pop(provider_id, None)
-        _last_good[provider_id] = result
-        _save_last_good()
+        _remember_good(provider_id, result)
         return result
     # A failed request never becomes zero usage, and never blanks a reading
     # that was true minutes ago; staleness alone retires it.
