@@ -1,75 +1,164 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const {EventEmitter} = require('node:events');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const {Updates} = require('./updates');
 
-function setup(enabled = true) {
+const ON = {updater: true, automatic: true, reason: ''};
+const INSTALLER = crypto.randomBytes(2_000);
+const SHA = crypto.createHash('sha512').update(INSTALLER).digest('base64');
+const URL_HREF = 'https://github.com/aaltaay/TokenMaxxing/releases/download/v042/TokenMaxxing-Setup-v042.exe';
+
+/**
+ * A stand-in for electron-updater's NsisUpdater: it finds `latest` (or nothing),
+ * plans the download the way the real one does, and on downloadUpdate() reports
+ * downloaded only if our hand-off left the right file in its pending cache.
+ */
+function setup({latest = '3.0.42', gate = ON, stopEngine, fetch} = {}) {
+  const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tm-updates-'));
   const updater = new EventEmitter();
-  let checks = 0, installs = 0;
-  updater.checkForUpdates = async () => { checks++; updater.emit('update-not-available'); };
-  updater.quitAndInstall = () => { installs++; };
-  const updates = new Updates({updater, enabled, version: '2.1.0'});
-  return {updates, updater, checks: () => checks, installs: () => installs};
+  const calls = {checks: 0, installs: [], restarts: 0, attention: 0};
+  updater.checkForUpdates = async () => {
+    calls.checks++;
+    updater.emit('checking-for-update');
+    if (!latest) {
+      updater.emit('update-not-available', {});
+      return {isUpdateAvailable: false};
+    }
+    const updateInfo = {version: latest};
+    updater.updateInfoAndProvider = {provider: {resolveFiles: () => [{url: new URL(URL_HREF), info: {sha512: SHA, size: INSTALLER.length}}]}};
+    updater.emit('update-available', updateInfo);
+    return {isUpdateAvailable: true, updateInfo};
+  };
+  updater.getOrCreateDownloadHelper = async () => ({cacheDir});
+  updater.downloadUpdate = async () => {
+    const file = path.join(cacheDir, 'pending', 'TokenMaxxing-Setup-v042.exe');
+    if (fs.existsSync(file) && fs.readFileSync(file).equals(INSTALLER)) updater.emit('update-downloaded', {version: latest});
+    else updater.emit('error', new Error('sha512 checksum mismatch'));
+  };
+  updater.quitAndInstall = (silent, runAfter) => calls.installs.push([silent, runAfter]);
+  const views = [];
+  const progress = [];
+  const updates = new Updates({
+    updater, gate, version: '3.0.40', sleep: async () => {},
+    fetch: fetch || (async (_url, init) => {
+      const [start, end] = /bytes=(\d+)-(\d+)/.exec(init.headers.Range).slice(1).map(Number);
+      const slice = INSTALLER.subarray(start, end + 1);
+      return {status: 206, headers: {get: () => `bytes ${start}-${end}/${INSTALLER.length}`},
+        arrayBuffer: async () => slice.buffer.slice(slice.byteOffset, slice.byteOffset + slice.length)};
+    }),
+    publish: view => views.push(view),
+    setProgress: value => progress.push(value),
+    attention: () => calls.attention++,
+    stopEngine: stopEngine || (async () => true),
+    restartEngine: async () => { calls.restarts++; },
+  });
+  return {updates, updater, calls, views, progress, cleanup: () => fs.rmSync(cacheDir, {recursive: true, force: true})};
 }
 
-test('development builds never contact the update server or install', async () => {
-  const s = setup(false);
-  await s.updates.check();
+test('a source checkout never contacts the update server or installs', async () => {
+  const s = setup({gate: {updater: false, automatic: false, reason: 'running from source (not packaged)'}});
+  await s.updates.check('manual');
   s.updates.start();
-  assert.equal(s.updates.install(), false);
-  assert.equal(s.checks(), 0);
-  assert.equal(s.updates.state.status, 'disabled');
+  assert.equal(await s.updates.install(), false);
+  assert.equal(s.calls.checks, 0);
+  assert.equal(s.updates.view.status, 'disabled');
+  assert.equal(s.updates.view.installed, 'v040');
+  assert.equal(s.updater.autoInstallOnAppQuit, undefined);
+  s.cleanup();
 });
 
-test('only a downloaded update can install, once, with explicit restart', async () => {
+test('a newer release downloads in the background, asks once, and installs only on the click', async () => {
   const s = setup();
+  assert.equal(s.updater.autoDownload, false);
   assert.equal(s.updater.autoInstallOnAppQuit, false);
   assert.equal(s.updater.allowDowngrade, false);
-  assert.equal(s.updates.install(), false);
-  s.updater.emit('update-available', {version: '2.2.0'});
-  s.updater.emit('download-progress', {percent: 45.6});
-  assert.equal(s.updates.state.percent, 46);
-  assert.equal(s.updates.install(), false);
-  s.updater.emit('update-downloaded', {version: '2.2.0'});
-  await s.updates.check();
-  assert.equal(s.checks(), 0);
-  assert.equal(s.updates.install(), true);
-  assert.equal(s.updates.install(), false);
-  assert.equal(s.installs(), 1);
+  const view = await s.updates.check('launch');
+  assert.equal(view.status, 'ready');
+  assert.equal(view.version, 'v042');
+  assert.ok(s.views.some(v => v.status === 'downloading'));
+  assert.ok(s.progress.some(v => v > 0 && v <= 1));
+  assert.equal(s.progress.at(-1), -1);
+  assert.equal(s.calls.attention, 1);
+  assert.deepEqual(s.calls.installs, []);
+  // Ready stays ready: an automatic check does not run, a manual one does not re-download.
+  await s.updates.check('recheck');
+  assert.equal(s.calls.checks, 1);
+  await s.updates.check('manual');
+  assert.equal(s.updates.view.status, 'ready');
+  assert.equal(s.calls.attention, 1);
+  assert.equal(await s.updates.install(), true);
+  assert.equal(await s.updates.install(), false);
+  assert.deepEqual(s.calls.installs, [[false, true]]);
+  s.cleanup();
 });
 
-test('concurrent checks are coalesced and failed checks can retry', async () => {
+test('Later quiets the ask for that release but keeps Restart to update', async () => {
   const s = setup();
-  let reject;
-  s.updater.checkForUpdates = () => new Promise((_, fail) => { reject = fail; });
-  const first = s.updates.check();
-  const pending = s.updates.pending;
-  const second = s.updates.check();
-  assert.equal(s.updates.pending, pending);
-  await Promise.resolve();
-  reject(new Error('offline'));
-  await Promise.all([first, second]);
-  assert.equal(s.updates.state.status, 'error');
-  s.updater.checkForUpdates = async () => s.updater.emit('update-not-available');
-  await s.updates.check();
-  assert.equal(s.updates.state.status, 'current');
+  await s.updates.check('launch');
+  const view = s.updates.later();
+  assert.equal(view.dismissed, true);
+  assert.equal(view.status, 'ready');
+  s.cleanup();
 });
 
-test('a synchronous updater failure does not leave a stuck check', async () => {
+test('nothing installs unless the engine is confirmed stopped, and the engine comes back', async () => {
+  const s = setup({stopEngine: async () => false});
+  await s.updates.check('launch');
+  assert.equal(await s.updates.install(), false);
+  assert.deepEqual(s.calls.installs, []);
+  assert.equal(s.calls.restarts, 1);
+  assert.equal(s.updates.view.status, 'ready');
+  assert.match(s.updates.view.error, /did not stop/);
+  s.cleanup();
+});
+
+test('an installer that fails to start brings the engine back and stays offered', async () => {
   const s = setup();
+  await s.updates.check('launch');
+  s.updater.quitAndInstall = () => { throw new Error('spawn EACCES'); };
+  assert.equal(await s.updates.install(), false);
+  assert.equal(s.calls.restarts, 1);
+  assert.equal(s.updates.view.status, 'ready');
+  s.cleanup();
+});
+
+test('up to date, and concurrent checks share one request', async () => {
+  const s = setup({latest: null});
+  const [a, b] = [s.updates.check('manual'), s.updates.check('manual')];
+  assert.equal(a, b);
+  assert.equal((await a).status, 'current');
+  assert.equal(s.calls.checks, 1);
+  s.cleanup();
+});
+
+test('a check that throws before electron-updater reports it still fails, and can be retried', async () => {
+  const s = setup({latest: null});
+  const original = s.updater.checkForUpdates;
   s.updater.checkForUpdates = () => { throw new Error('invalid configuration'); };
-  await s.updates.check();
+  assert.equal((await s.updates.check('launch')).status, 'failed');
   assert.equal(s.updates.pending, null);
-  assert.equal(s.updates.state.status, 'error');
+  s.updater.checkForUpdates = original;
+  assert.equal((await s.updates.check('manual')).status, 'current');
+  s.cleanup();
 });
 
-test('a separate download rejection is handled and retryable', async () => {
-  const s = setup();
-  s.updater.checkForUpdates = async () => {
-    s.updater.emit('update-available', {version: '2.2.0'});
-    return {downloadPromise: Promise.reject(new Error('checksum mismatch'))};
-  };
-  await s.updates.check();
-  assert.equal(s.updates.state.status, 'error');
-  assert.equal(s.updates.install(), false);
+test('a download that stops keeps its place and the next check resumes it', async () => {
+  let fail = true;
+  const s = setup({fetch: async (_url, init) => {
+    if (fail) throw new Error('net::ERR_SSL_PROTOCOL_ERROR');
+    const [start, end] = /bytes=(\d+)-(\d+)/.exec(init.headers.Range).slice(1).map(Number);
+    const slice = INSTALLER.subarray(start, end + 1);
+    return {status: 206, headers: {get: () => `bytes ${start}-${end}/${INSTALLER.length}`},
+      arrayBuffer: async () => slice.buffer.slice(slice.byteOffset, slice.byteOffset + slice.length)};
+  }});
+  const stopped = await s.updates.check('launch');
+  assert.deepEqual([stopped.status, stopped.failedStage], ['failed', 'download']);
+  assert.ok(s.views.some(v => v.retry > 0));
+  fail = false;
+  assert.equal((await s.updates.check('manual')).status, 'ready');
+  s.cleanup();
 });

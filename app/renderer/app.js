@@ -540,7 +540,8 @@ function renderBell(summaries = overviewSummaries()) {
   // still marks the bell even when every window is fine.
   const badge = $('bellBadge');
   const urgent = rows.some(row => row.tone === 'now' || row.tone === 'soon');
-  const updateReady = state.update?.status === 'ready';
+  // Later quiets the badge for that release; Restart to update stays in the panel.
+  const updateReady = state.update?.status === 'ready' && !state.update.dismissed;
   const fault = state.statusKind === 'now';
   badge.hidden = !rows.length && !updateReady && !fault;
   badge.textContent = rows.length ? String(Math.min(rows.length, 9)) : '';

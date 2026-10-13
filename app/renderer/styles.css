@@ -714,6 +714,7 @@ button.wc-tile { font: inherit; color: inherit; text-align: left; cursor: pointe
 .bell-events { margin-left: auto; white-space: nowrap; }
 .bell-update { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .bell-update .chip { flex: none; }
+.bell-update-actions { display: flex; flex: none; gap: 6px; }
 .bell-update [hidden] { display: none; }
 
 /* ── misc ──────────────────────────────────────────────────────────────── */
