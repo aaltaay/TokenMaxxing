@@ -22,8 +22,12 @@
         <path d="M4 10.5 10 4.5 16 10.5" opacity="0.55"/>
         <path d="M4 16 10 10 16 16"/>
       </svg>
-      <div>
-        <div class="brand-name"><span class="bm-soft">TOKENMA</span><span class="bm-xx">XX</span><span class="bm-soft">ING</span></div>
+      <div class="brand-text">
+        <div class="brand-line">
+          <div class="brand-name"><span class="bm-soft">TOKENMA</span><span class="bm-xx">XX</span><span class="bm-soft">ING</span></div>
+          <!-- The running version: v051 for an installed build, dev for a source run. -->
+          <span class="brand-ver" id="brandVersion" hidden></span>
+        </div>
         <div class="brand-sub" id="brandSub">Connecting to the usage engine…</div>
       </div>
     </div>
@@ -107,7 +111,7 @@
 
     <!-- ── Overview ──────────────────────────────────────────────────── -->
     <section class="view is-active" id="view-overview" role="tabpanel" aria-labelledby="tab-overview">
-      <div id="overviewBody"><div class="ov-loading">Reading your agent logs…</div></div>
+      <div id="overviewBody"><div class="ov-loading">Reading your usage…</div></div>
     </section>
 
     <!-- ── This chat ─────────────────────────────────────────────────── -->
