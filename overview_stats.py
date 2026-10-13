@@ -1,15 +1,28 @@
 """Cycle-wide totals from local Claude Code and Codex logs: API-price value,
 tokens, how long agents ran, how long you were at the keyboard, and what the
-agents did. Every figure is read from the logs; nothing is guessed."""
+agents did. Every figure is read from the logs; nothing is guessed.
+
+What each log has said so far is kept on disk too, in `overview-facts.json`
+in the HUD folder, so a fresh engine reads only what the logs gained since the
+last one looked instead of every log in the range."""
 from __future__ import annotations
 
+import base64
+import binascii
 import collections
+import hashlib
 import json
+import os
+import sys
+import tempfile
 import threading
+import time
+import types
 from datetime import datetime
 
 import session_cost as sc
 import session_usage as su
+from cursor_usage import hud_dir
 
 # A log that goes quiet for longer than this was idle, not working.
 IDLE_GAP = 300
@@ -21,6 +34,16 @@ SITTING_PAD = 5 * 60
 THINK_CAP = 15 * 60
 # Longer than any range the Overview shows (30 days, or a billing cycle).
 FORGET_AFTER = 40 * 86400
+# The saved facts' layout. Changes to how logs are read need no bump: the
+# saved file names the readers and prices it was made with (see _readers).
+CACHE_VERSION = 1
+# Save what was read once reading it again would take this many seconds,
+SAVE_AFTER_READING = 2
+# during one long read every this many seconds of it, so quitting midway
+# keeps most of it,
+CHECKPOINT_EVERY = 30
+# and otherwise at most this often while the logs keep growing.
+SAVE_EVERY = 300
 
 TOOL_GROUPS = (
     ('Shell', ('bash', 'powershell', 'exec', 'shell', 'local_shell_call', 'exec_command', 'write_stdin')),
@@ -36,6 +59,13 @@ TOOL_GROUPS = (
 _facts: dict = {}
 # Held while a log is read, so two refreshes never read the same one at once.
 _lock = threading.Lock()
+# Held while the facts are written out, so saves land in the order they were taken.
+_writing = threading.Lock()
+# The file on disk: taken up yet, logs read since the last save and the
+# seconds that took, when that save was, and the readers' fingerprint.
+_disk = {'loaded': False, 'dirty': False, 'unsaved': 0.0, 'saved_at': 0.0, 'readers': None}
+# How far the reads under way have got, in bytes, for the "reading" screen.
+_progress = {'read': 0, 'total': 0, 'running': 0}
 
 
 def _epoch(stamp):
@@ -115,6 +145,12 @@ def _owner(path):
     return parts[parts.index('subagents') - 1] if 'subagents' in parts else path.stem
 
 
+def _id_digest(key):
+    """An id as 8 bytes, so a month of logs' ids stays small on disk. Two ids
+    in one log sharing a digest is a chance of about one in a billion."""
+    return hashlib.blake2b(str(key).encode('utf-8', 'surrogatepass'), digest_size=8).digest()
+
+
 def _claude_reader(path, facts):
     owner = _owner(path)
     seen = facts.setdefault('seen', set())
@@ -124,6 +160,7 @@ def _claude_reader(path, facts):
         logs earlier records again: count each id once. No id, no repeat."""
         if key is None:
             return True
+        key = _id_digest(key)
         if key in seen:
             return False
         seen.add(key)
@@ -213,6 +250,7 @@ def _read(path, facts, reader):
                     break
                 record = None
             facts['offset'] += len(line)
+            _progress['read'] += len(line)
             if isinstance(record, dict):
                 t = reader(record)
                 if t is not None:
@@ -220,35 +258,257 @@ def _read(path, facts, reader):
     facts['intervals'] = _intervals(times, facts['intervals'])
 
 
-def file_facts(provider, path):
+def file_facts(provider, path, stat=None):
     """One log's facts, kept and extended as the file grows."""
-    stat = path.stat()
+    stat = stat or path.stat()
     key = (provider, str(path))
     stamp = (stat.st_size, stat.st_mtime_ns)
     with _lock:
+        if not _disk['loaded']:
+            _load()
         facts = _facts.get(key)
         if facts and facts['stamp'] == stamp:
             return facts
         if not facts or stat.st_size < facts['offset']:
             facts = {'kind': 'subagent' if provider == 'claude' and 'subagents' in path.parts else 'session',
                      'offset': 0, 'intervals': [], 'prompts': [], 'requests': [], 'tools': []}
+        began = time.monotonic()
         _read(path, facts, (_claude_reader if provider == 'claude' else _codex_reader)(path, facts))
         facts['stamp'] = stamp
         _facts[key] = facts
+        _disk['dirty'] = True
+        _disk['unsaved'] += time.monotonic() - began
         return facts
 
 
 def _logs(provider, since):
+    """The logs written to since `since`, each with what stat said of it."""
     root = su.session_root(provider)
     if not root.exists():
         return []
     out = []
     for path in root.rglob('*.jsonl'):
         try:
-            if path.stat().st_mtime >= since:
-                out.append(path)
+            stat = path.stat()
         except OSError:
             continue
+        if stat.st_mtime >= since:
+            out.append((path, stat))
+    return out
+
+
+# ── the facts on disk ─────────────────────────────────────────────────────
+
+def cache_path():
+    return hud_dir() / 'overview-facts.json'
+
+
+def _readers():
+    """A fingerprint of how logs are read: the code of file_facts and of every
+    function in this module and session_cost it reaches, and the constants
+    (IDLE_GAP, TOOL_GROUPS, the price tables...) they use. Saved facts count
+    only under the same fingerprint, so a new price or reading rule reads
+    every log afresh instead of keeping numbers the new code would not give."""
+    ours = {__name__, sc.__name__}
+    # Python's own parsing (JSON, ISO dates) can change between minor versions.
+    digest = hashlib.sha256(repr(sys.version_info[:2]).encode())
+    walked = set()
+
+    def canon(value):
+        if isinstance(value, dict):
+            return '{%s}' % ','.join(f'{canon(k)}:{canon(v)}' for k, v in value.items())
+        if isinstance(value, (list, tuple)):
+            return '[%s]' % ','.join(canon(v) for v in value)
+        if isinstance(value, (set, frozenset)):
+            return '{%s}' % ','.join(sorted(canon(v) for v in value))
+        if isinstance(value, types.FunctionType):
+            walk(value)
+            return value.__qualname__
+        if value is None or isinstance(value, (bool, int, float, str, bytes)):
+            return repr(value)
+        # Locks, caches and other live state say nothing about how logs are read.
+        return type(value).__name__
+
+    def code(block, scope):
+        digest.update(block.co_code)
+        digest.update(canon([c for c in block.co_consts if not isinstance(c, types.CodeType)]).encode())
+        for name in block.co_names:
+            value = scope.get(name)
+            if isinstance(value, types.ModuleType):
+                if value.__name__ in ours:
+                    for attr in block.co_names:
+                        member = getattr(value, attr, None)
+                        if attr.isupper() or isinstance(member, types.FunctionType):
+                            digest.update(f'{attr}={canon(member)}'.encode())
+            elif isinstance(value, types.FunctionType) or name.isupper():
+                digest.update(f'{name}={canon(value)}'.encode())
+        for inner in block.co_consts:
+            if isinstance(inner, types.CodeType):
+                code(inner, scope)
+
+    def walk(function):
+        if function in walked or function.__module__ not in ours:
+            return
+        walked.add(function)
+        digest.update(canon(function.__defaults__).encode())
+        code(function.__code__, function.__globals__)
+
+    walk(file_facts)
+    return digest.hexdigest()
+
+
+def _fingerprint():
+    if _disk['readers'] is None:
+        _disk['readers'] = _readers()
+    return _disk['readers']
+
+
+def _number(value, kinds=(int, float)):
+    if isinstance(value, bool) or not isinstance(value, kinds):
+        raise ValueError(f'not a number: {value!r}')
+    return value
+
+
+def _optional(value):
+    return None if value is None else _number(value)
+
+
+def _text(value):
+    if not isinstance(value, str):
+        raise ValueError(f'not text: {value!r}')
+    return value
+
+
+def _saveable(facts):
+    out = {key: value for key, value in facts.items() if key != 'seen'}
+    if 'seen' in facts:
+        out['seen'] = base64.b64encode(b''.join(facts['seen'])).decode('ascii')
+    return out
+
+
+def _revive(saved):
+    """Saved facts back in the shapes the readers keep them in, checked field
+    by field. Anything off raises, and that log is read afresh."""
+    stamp = tuple(_number(n, int) for n in saved['stamp'])
+    offset = _number(saved['offset'], int)
+    if saved['kind'] not in ('session', 'subagent') or len(stamp) != 2 or offset < 0:
+        raise ValueError('malformed log facts')
+    facts = {**saved, 'stamp': stamp, 'offset': offset,
+             'intervals': [[_number(s), _number(e)] for s, e in saved['intervals']],
+             'prompts': [(_number(t), _number(think)) for t, think in saved['prompts']],
+             'requests': [(_number(t), _optional(cents), _number(a), _number(b), _number(c), _number(d))
+                          for t, cents, a, b, c, d in saved['requests']],
+             'tools': [(_number(t), _text(group)) for t, group in saved['tools']]}
+    for key in ('last_t', 'last_reply'):
+        if key in saved:
+            facts[key] = _optional(saved[key])
+    if saved.get('previous') is not None:
+        facts['previous'] = tuple(_number(n) for n in saved['previous'])
+    if 'seen' in saved:
+        raw = base64.b64decode(_text(saved['seen']), validate=True)
+        if len(raw) % 8:
+            raise ValueError('malformed seen ids')
+        facts['seen'] = {raw[i:i + 8] for i in range(0, len(raw), 8)}
+    return facts
+
+
+def _load():
+    """Take up what the last engine saved; called once, under _lock. A file
+    that is unreadable, of another layout or made by other readers or prices
+    is passed over, and every log is read afresh."""
+    _disk.update(loaded=True, saved_at=time.monotonic())
+    # A save cut short by the engine being killed leaves its temporary file.
+    for stray in cache_path().parent.glob('.overview-facts-*.tmp'):
+        try:
+            if time.time() - stray.stat().st_mtime > 3600:
+                stray.unlink()
+        except OSError:
+            pass
+    try:
+        saved = json.loads(cache_path().read_bytes())
+    except (OSError, ValueError):
+        return
+    if (not isinstance(saved, dict) or saved.get('version') != CACHE_VERSION
+            or saved.get('readers') != _fingerprint() or not isinstance(saved.get('logs'), list)):
+        return
+    for entry in saved['logs']:
+        try:
+            provider, path, facts = entry
+            if provider in ('claude', 'codex') and isinstance(path, str):
+                _facts.setdefault((provider, path), _revive(facts))
+        except (TypeError, ValueError, KeyError, AttributeError, binascii.Error):
+            continue
+
+
+def _save():
+    """Write the facts where the next engine will look. It is a cache: a write
+    that fails is tried again at a later save, never an error."""
+    with _writing:
+        with _lock:
+            if not _disk['dirty']:
+                return
+            blob = json.dumps({'version': CACHE_VERSION, 'readers': _fingerprint(),
+                               'logs': [[provider, path, _saveable(facts)] for (provider, path), facts in _facts.items()]},
+                              separators=(',', ':'))
+            _disk.update(dirty=False, unsaved=0.0, saved_at=time.monotonic())
+        path = cache_path()
+        temporary = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handle, temporary = tempfile.mkstemp(dir=path.parent, prefix='.overview-facts-', suffix='.tmp')
+            with os.fdopen(handle, 'w', encoding='utf-8') as stream:
+                stream.write(blob)
+            os.replace(temporary, path)
+        except OSError:
+            _disk['dirty'] = True
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+
+
+def _save_due(reread):
+    """Whether to save: what is unsaved would take `reread` seconds to read
+    again, or the last save is SAVE_EVERY old."""
+    return _disk['dirty'] and (_disk['unsaved'] >= reread or time.monotonic() - _disk['saved_at'] >= SAVE_EVERY)
+
+
+def progress():
+    """How far the overview reads under way have got, or None between reads."""
+    if not _progress['running']:
+        return None
+    return {'read': _progress['read'], 'total': max(_progress['read'], _progress['total'])}
+
+
+def _read_logs(since):
+    """(provider, facts) for every log written to since `since`, read as far
+    as each has grown, saving along the way during a long first read."""
+    logs = [(provider, path, stat) for provider in ('claude', 'codex') for path, stat in _logs(provider, since)]
+    with _lock:
+        if not _disk['loaded']:
+            _load()
+        unread = 0
+        for provider, path, stat in logs:
+            facts = _facts.get((provider, str(path)))
+            if not facts or facts['stamp'] != (stat.st_size, stat.st_mtime_ns):
+                unread += stat.st_size - (facts['offset'] if facts and stat.st_size >= facts['offset'] else 0)
+        if not _progress['running']:
+            _progress.update(read=0, total=0)
+        _progress['running'] += 1
+        _progress['total'] = max(_progress['total'], _progress['read'] + unread)
+    out = []
+    try:
+        for provider, path, stat in logs:
+            try:
+                out.append((provider, file_facts(provider, path, stat)))
+            except OSError:
+                continue
+            if _save_due(CHECKPOINT_EVERY):
+                _save()
+    finally:
+        with _lock:
+            _progress['running'] -= 1
     return out
 
 
@@ -274,30 +534,31 @@ def overview(since, now=None, cursor_minutes=None):
         agents.append(('cursor', spans))
     tools = collections.Counter()
     prompts = []
-    for provider in ('claude', 'codex'):
-        for path in _logs(provider, since):
-            try:
-                facts = file_facts(provider, path)
-            except OSError:
-                continue
-            # Only what happened in the range counts, even in a log begun before it.
-            spans = [(max(s, since), e) for s, e in facts['intervals'] if e >= since]
-            row = per[provider]
-            for t, cents, inp, out, cache_read, cache_write in facts['requests']:
-                if t >= since:
-                    row['cents'] += cents or 0
-                    row['unpriced'] += cents is None
-                    row['tokens'].update({'input': inp, 'output': out, 'cache_read': cache_read, 'cache_write': cache_write})
-            tools.update(group for t, group in facts['tools'] if t >= since)
-            prompts += [p for p in facts['prompts'] if p[0] >= since]
-            if spans:
-                row['sessions' if facts['kind'] == 'session' else 'subagents'] += 1
-                row['agent_seconds'] += sum(e - s for s, e in spans)
-                agents.append((provider, spans))
+    for provider, facts in _read_logs(since):
+        # Only what happened in the range counts, even in a log begun before it.
+        spans = [(max(s, since), e) for s, e in facts['intervals'] if e >= since]
+        row = per[provider]
+        for t, cents, inp, out, cache_read, cache_write in facts['requests']:
+            if t >= since:
+                row['cents'] += cents or 0
+                row['unpriced'] += cents is None
+                row['tokens'].update({'input': inp, 'output': out, 'cache_read': cache_read, 'cache_write': cache_write})
+        tools.update(group for t, group in facts['tools'] if t >= since)
+        prompts += [p for p in facts['prompts'] if p[0] >= since]
+        if spans:
+            row['sessions' if facts['kind'] == 'session' else 'subagents'] += 1
+            row['agent_seconds'] += sum(e - s for s, e in spans)
+            agents.append((provider, spans))
     # Forget logs too old for any range, so switching ranges never rereads one.
     with _lock:
-        for key in [key for key, facts in _facts.items() if facts['stamp'][1] / 1e9 < now - FORGET_AFTER]:
+        old = [key for key, facts in _facts.items() if facts['stamp'][1] / 1e9 < now - FORGET_AFTER]
+        for key in old:
             del _facts[key]
+        _disk['dirty'] = _disk['dirty'] or bool(old)
+    # Saved beside the reply, not ahead of it. Not a daemon (as the bridge's
+    # request threads are), so an engine told to quit lets the save land first.
+    if _save_due(SAVE_AFTER_READING):
+        threading.Thread(target=_save, name='overview-save', daemon=False).start()
 
     # Real time with any agent running, and the most running at once.
     edges = sorted([(s, 1) for _, spans in agents for s, _ in spans] +

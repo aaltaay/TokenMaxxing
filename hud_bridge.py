@@ -247,6 +247,12 @@ def cmd_overview(since: float | None = None) -> dict:
     return stats
 
 
+def cmd_overview_progress() -> dict | None:
+    """How far an `overview` still reading the agent logs has got, in bytes;
+    None when none is. Only a first read of every log is slow enough to show."""
+    return overview_stats.progress()
+
+
 def cmd_set_plan_prices(prices: dict) -> dict:
     cfg = rs.load_config()
     current = cfg.get("plan_prices") or {}
@@ -297,6 +303,7 @@ COMMANDS = {
     "cached_cycle": cmd_cached_cycle,
     "resets": cmd_resets,
     "overview": cmd_overview,
+    "overview_progress": cmd_overview_progress,
     "set_plan_prices": cmd_set_plan_prices,
     "providers": cmd_providers,
     "due": cmd_due,
