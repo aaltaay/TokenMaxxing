@@ -24,6 +24,12 @@ CYCLE_FETCH_MAX_SECONDS = 150
 SCHEMA_VERSION = 2
 EVENT_FETCH_MAX_SECONDS = 120
 EVENT_FETCH_MAX_PAGES = 500
+# A page that fails (a dropped TLS connection, say) is asked for again before
+# the fetch gives up on the rest of the range.
+EVENT_PAGE_ATTEMPTS = 3
+# Cursor activity minutes are kept this long, past any range the Overview shows.
+ACTIVITY_KEEP_S = 40 * 86400
+ACTIVITY_KINDS = ("interactive", "headless", "subagent")
 DASHBOARD = "https://cursor.com"
 API2 = "https://api2.cursor.sh"
 USER_AGENT = "token-hud/2.0"
@@ -49,6 +55,10 @@ def hud_dir() -> Path:
 
 def cache_path() -> Path:
     return hud_dir() / "cycle-cache.json"
+
+
+def activity_path() -> Path:
+    return hud_dir() / "cursor-activity.json"
 
 
 def connect(db: Path | None = None) -> sqlite3.Connection:
@@ -428,14 +438,23 @@ def fetch_events(cookie: str, query: dict, max_seconds: float = EVENT_FETCH_MAX_
         if remaining <= 0:
             result["events_incomplete_reason"] = "Event fetch time limit reached"
             break
-        try:
-            chunk = dashboard_request(
-                cookie, "/api/dashboard/get-filtered-usage-events", "POST",
-                {**query, "page": page, "pageSize": 1000},
-                timeout=max(0.1, min(45, remaining)),
-            )
-        except Exception as exc:
-            result["events_incomplete_reason"] = f"Event page fetch failed ({type(exc).__name__})"
+        chunk = failure = None
+        for _ in range(EVENT_PAGE_ATTEMPTS):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                chunk = dashboard_request(
+                    cookie, "/api/dashboard/get-filtered-usage-events", "POST",
+                    {**query, "page": page, "pageSize": 1000},
+                    timeout=max(0.1, min(45, remaining)),
+                )
+                break
+            except Exception as exc:
+                failure = exc
+        if chunk is None:
+            result["events_incomplete_reason"] = (f"Event page fetch failed ({type(failure).__name__})"
+                                                  if failure else "Event fetch time limit reached")
             break
         result["events_pages"] += 1
         rows = chunk.get("usageEventsDisplay")
@@ -471,22 +490,98 @@ def fetch_events(cookie: str, query: dict, max_seconds: float = EVENT_FETCH_MAX_
     return result
 
 
-def _event_summaries(events: list[dict], local: dict, cloud: dict,
-                     auto_models: list) -> dict:
-    by_model, by_day, by_conv = {}, {}, {}
-    headless, interactive, unclassified = ({"n": 0, "cents": 0.0} for _ in range(3))
-    # The minutes requests happened in, for time-at-the-keyboard and agent time.
-    # Subagents a chat spawns work on their own: agent time, not yours.
-    minutes = {"interactive": set(), "headless": set(), "subagent": set()}
+def event_minutes(events: list[dict]) -> dict[str, set]:
+    """The minutes requests happened in, for time-at-the-keyboard and agent time.
+    Subagents a chat spawns work on their own: agent time, not yours."""
+    minutes = {kind: set() for kind in ACTIVITY_KINDS}
     for ev in events:
-        tu = ev.get("tokenUsage") or {}
-        cents = _event_cents(ev)
-        model = ev.get("model") or "Unknown model"
         ts = iso_to_ms(ev.get("timestamp"))
         if ts is not None:
             kind = ("subagent" if is_subagent(ev.get("conversationId")) else
                     "headless" if ev.get("isHeadless") is True else "interactive")
             minutes[kind].add(int(ts // 60000) * 60)
+    return minutes
+
+
+def _minute_lists(value) -> dict | None:
+    """Activity minutes as stored, or None if they are not that shape."""
+    if not isinstance(value, dict):
+        return None
+    out = {}
+    for kind in ACTIVITY_KINDS:
+        times = value.get(kind) or []
+        if not isinstance(times, list) or any(isinstance(t, bool) or not isinstance(t, (int, float))
+                                              or not math.isfinite(t) for t in times):
+            return None
+        out[kind] = times
+    return out
+
+
+def _stored_minutes(owner: str) -> dict | None:
+    """The activity store's minutes, if it belongs to this account."""
+    try:
+        store = json.loads(activity_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(store, dict) or store.get("schema_version") != 1 or store.get("email") != owner:
+        return None
+    return _minute_lists(store.get("minutes"))
+
+
+def _snapshot_minutes(owner: str) -> dict | None:
+    """The minutes in the last Cursor snapshot, if it belongs to this account."""
+    try:
+        report = json.loads(cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(report, dict) or _normalized_email(report.get("email")) != owner:
+        return None
+    return _minute_lists(report.get("activity_minutes"))
+
+
+def remember_activity(email, events: list[dict], now: float | None = None) -> dict | None:
+    """Fold the minutes these events happened in into the local activity store.
+    Every fetched event is a request Cursor really logged, so even the pages of
+    a fetch that failed partway add true minutes. A failed refresh never takes
+    minutes away, and they outlive the billing cycle that logged them."""
+    owner = _normalized_email(email)
+    if not owner:
+        return None
+    now = time.time() if now is None else now
+    known = _stored_minutes(owner) or _snapshot_minutes(owner) or {}
+    fresh = event_minutes(events)
+    cutoff = now - ACTIVITY_KEEP_S
+    minutes = {kind: sorted(t for t in set(known.get(kind) or ()) | fresh[kind] if t >= cutoff)
+               for kind in ACTIVITY_KINDS}
+    path = activity_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pending = path.with_name(path.name + ".tmp")
+    pending.write_text(json.dumps({"schema_version": 1, "email": owner, "minutes": minutes}), encoding="utf-8")
+    pending.replace(path)
+    return minutes
+
+
+def read_activity_minutes() -> dict | None:
+    """Cursor's activity minutes for the account signed in now, from the local
+    store (or, before the first refresh fills it, the last snapshot)."""
+    try:
+        cookie, email = _current_cursor_identity()
+    except (OSError, sqlite3.Error):
+        return None
+    if not cookie or not email:
+        return None
+    return _stored_minutes(email) or _snapshot_minutes(email)
+
+
+def _event_summaries(events: list[dict], local: dict, cloud: dict,
+                     auto_models: list) -> dict:
+    by_model, by_day, by_conv = {}, {}, {}
+    headless, interactive, unclassified = ({"n": 0, "cents": 0.0} for _ in range(3))
+    for ev in events:
+        tu = ev.get("tokenUsage") or {}
+        cents = _event_cents(ev)
+        model = ev.get("model") or "Unknown model"
+        ts = iso_to_ms(ev.get("timestamp"))
         try:
             day = datetime.fromtimestamp(ts / 1000).astimezone().strftime("%Y-%m-%d") if ts is not None else "Unknown date"
         except (OSError, ValueError, OverflowError):
@@ -539,7 +634,7 @@ def _event_summaries(events: list[dict], local: dict, cloud: dict,
             "conversations": conversations,
             "headless": headless, "interactive": interactive,
             "unclassified": unclassified,
-            "activity_minutes": {kind: sorted(values) for kind, values in minutes.items()}}
+            "activity_minutes": {kind: sorted(values) for kind, values in event_minutes(events).items()}}
 
 
 RANGE_DAYS = (("day", 0), ("week", 6), ("month", 29))
@@ -711,6 +806,7 @@ def _fetch_cycle(force: bool = False) -> dict:
     report["findings"] = build_findings(report)
     if _current_cursor_identity() != initial_identity:
         raise RuntimeError("Cursor account changed during refresh; retry to load the current account.")
+    remember_activity(email, event_result["events"])
     path.parent.mkdir(parents=True, exist_ok=True)
     pending = path.with_name(path.name + ".tmp")
     pending.write_text(json.dumps(report, allow_nan=False), encoding="utf-8")
