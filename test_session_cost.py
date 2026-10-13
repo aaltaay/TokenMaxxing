@@ -93,6 +93,10 @@ class ClaudeSessionCostTests(unittest.TestCase):
         self.assertEqual(c.claude_rates('claude-sonnet-5[1m]'), c.CLAUDE_RATES['claude-sonnet-5'])
         self.assertIsNone(c.claude_rates('claude-fable-5-2'))
 
+    def test_current_opus_and_sonnet_are_priced(self):
+        self.assertEqual(c.claude_rates('claude-opus-5-5'), (4.0, 0.2, 5.0, 20.0))
+        self.assertEqual(c.claude_rates('claude-sonnet-5-5[1m]'), (2.0, 0.2, 2.5, 10.0))
+
     def test_streaming_records_sharing_a_request_id_are_one_request(self):
         usage = {'input_tokens': 10, 'cache_read_input_tokens': 0, 'cache_creation_input_tokens': 0, 'output_tokens': 100}
         records = [claude('claude-opus-5', usage), claude('claude-opus-5', usage), claude('claude-opus-5', usage),

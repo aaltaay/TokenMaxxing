@@ -13,17 +13,19 @@ FIELDS = ('input_tokens', 'cached_input_tokens', 'output_tokens')
 # Codex bills the whole request at the long-context rate past this many input tokens.
 LONG_CONTEXT = 272_000
 # Claude, USD per million tokens as (uncached input, cache read, 5-minute
-# cache write, output), verified 2026-09-20 against Anthropic's published API
+# cache write, output), verified 2026-10-13 against Anthropic's published API
 # pricing. A 1-hour cache write is 2x input instead of 1.25x.
 CLAUDE_RATES = {
     'claude-fable-5-1': (10.0, 0.25, 12.5, 50.0),
     'claude-mythos-5-1': (10.0, 0.25, 12.5, 50.0),
     'claude-fable-5': (10.0, 1.0, 12.5, 50.0),
     'claude-mythos-5': (10.0, 1.0, 12.5, 50.0),
+    'claude-opus-5-5': (4.0, 0.2, 5.0, 20.0),
     'claude-opus-5': (5.0, 0.5, 6.25, 25.0),
     'claude-opus-4-8': (5.0, 0.5, 6.25, 25.0),
     'claude-opus-4-7': (5.0, 0.5, 6.25, 25.0),
     'claude-opus-4-6': (5.0, 0.5, 6.25, 25.0),
+    'claude-sonnet-5-5': (2.0, 0.2, 2.5, 10.0),
     'claude-sonnet-5': (2.0, 0.2, 2.5, 10.0),
     'claude-sonnet-4-6': (3.0, 0.3, 3.75, 15.0),
     'claude-haiku-4-5': (1.0, 0.1, 1.25, 5.0),
