@@ -216,7 +216,7 @@ To get texts, choose **Connect Twilio SMS** under Limits & resets and enter your
 
 | Path | Contents |
 |---|---|
-| `~/.cursor/token-hud/` (override with `TOKEN_HUD_DIR`) | `cycle-cache.json` (last Cursor snapshot), `cursor-activity.json` (the minutes Cursor logged requests in, last 40 days), `reset-schedule.json` (alert and plan-price preferences), `reset-buzzed.json` (alerts already sent) |
+| `~/.cursor/token-hud/` (override with `TOKEN_HUD_DIR`) | `cycle-cache.json` (last Cursor snapshot), `cursor-activity.json` (the minutes Cursor logged requests in, last 40 days), `overview-facts.json` (what each Claude and Codex log of the last 40 days has said so far, so a restart reads only what they gained; safe to delete), `reset-schedule.json` (alert and plan-price preferences), `reset-buzzed.json` (alerts already sent) |
 | Windows: `%APPDATA%\Cursor\User\globalStorage\state.vscdb` | Cursor's local database, read-only |
 | macOS: `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | |
 | Linux: `~/.config/Cursor/User/globalStorage/state.vscdb` | |
