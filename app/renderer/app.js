@@ -541,7 +541,8 @@ function renderBell(summaries = overviewSummaries()) {
   // still marks the bell even when every window is fine.
   const badge = $('bellBadge');
   const urgent = rows.some(row => row.tone === 'now' || row.tone === 'soon');
-  const updateReady = state.update?.status === 'ready';
+  // Later quiets the badge for that release; Restart to update stays in the panel.
+  const updateReady = state.update?.status === 'ready' && !state.update.dismissed;
   const fault = state.statusKind === 'now';
   badge.hidden = !rows.length && !updateReady && !fault;
   badge.textContent = rows.length ? String(Math.min(rows.length, 9)) : '';
@@ -2146,6 +2147,8 @@ async function boot() {
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && bellOpen()) setBellOpen(false);
   });
+  // What's new opens a card of its own (renderer/whats-new.js); the panel steps out of its way.
+  $('btnWhatsNew').addEventListener('click', () => setBellOpen(false));
   window.hud.on('updateStatus', (value) => { state.update = value; renderBell(); });
   window.hud.updateStatus().then((value) => { state.update = value; renderBell(); }).catch(() => {});
 

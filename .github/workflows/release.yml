@@ -1,18 +1,75 @@
+# Windows installer + the electron-updater feed, released for every merge to main.
+#
+# Ported from Nova's desktop-pack.yml. Every pull request and push to main tests
+# and packs the installer (documentation-only changes skip it,
+# scripts/ci_scope.py). A push to main then:
+#   - `tag` tags the commit vNNN, its commit count (scripts/release_version.py),
+#     through the API -- every main commit, documentation-only included;
+#   - `publish` creates the vNNN GitHub Release with TokenMaxxing-Setup-vNNN.exe,
+#     its .blockmap and latest.yml -- the feed installed copies read -- whenever
+#     the installer was packed. Its notes come from the merged PR's `## What`
+#     (scripts/release_notes.py).
+# Installed copies find it within 2 hours (or 15 s after their next launch),
+# download it in the background and offer Restart to update.
+#
+# A Release is marked latest only when no higher vNNN Release exists, so an
+# older run that finishes late never rolls the feed back. A Release without
+# latest.yml would break every installed copy's check, so none is ever made.
+# Tags and releases made with GITHUB_TOKEN start no second run.
+#
+# Re-run a publish:  gh workflow run release.yml --ref vNNN
+# Tag by hand:       python scripts/release_version.py --ensure-tag --push-tag  (on an up-to-date main)
+# A pushed tag must be its commit's own count, or the pack refuses it.
+
 name: Windows release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+    tags: ['v[0-9]+']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  # PRs group by number (a new push cancels the old run); everything else groups
+  # by commit, so a burst of merges is never collapsed into the newest one's run
+  # -- a cancelled run would leave its commit untagged and unreleased.
+  group: release-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
-  build:
-    runs-on: windows-latest
+  scope:
+    name: Does this change the app?
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      app: ${{ steps.scope.outputs.app }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: scope
+        run: python3 scripts/ci_scope.py
+
+  pack:
+    name: Test and pack the installer
+    needs: scope
+    if: needs.scope.outputs.app == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    outputs:
+      tag: ${{ steps.rev.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The commit count is the version, so the whole history is needed.
+          fetch-depth: 0
+          # Pack the PR head, not GitHub's merge commit (one more commit than the branch).
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -23,12 +80,20 @@ jobs:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: scripts/requirements-build.txt
-      - name: Verify release version
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Number this build from git history
+        id: rev
         shell: pwsh
         run: |
-          $version = (Get-Content app/package.json | ConvertFrom-Json).version
-          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag must match app/package.json version' }
+          $tag = (python scripts/release_version.py --print-tag).Trim()
+          $version = (python scripts/release_version.py --print-version).Trim()
+          if (-not $tag -or -not $version) { throw 'release_version.py printed nothing' }
+          # A release tag must be this commit's own count, or the installed app
+          # would report a version the Release does not carry.
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne $tag) {
+            throw "release tag $env:GITHUB_REF_NAME is not this commit's revision $tag"
+          }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "Packing ``$tag`` (app version ``$version``)." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
       - run: npm ci
         working-directory: app
       - run: python -m pip install -r scripts/requirements-build.txt
@@ -36,42 +101,137 @@ jobs:
       - run: npm test
         working-directory: app
       - run: python scripts/build-engine.py
-      - run: npm run dist:win
-        working-directory: app
-      - name: Verify packaged engine and update feed
+      - name: Pack the installer and prove its update feed agrees
+        run: python scripts/pack_windows.py --tag ${{ steps.rev.outputs.tag }}
+      - name: Smoke-test the packaged engine
         shell: pwsh
         run: |
           & ./dist/win-unpacked/resources/engine/tokenmaxxing-engine.exe --once hello
           if ($LASTEXITCODE -ne 0) { throw 'Packaged engine smoke test failed' }
-          foreach ($file in @('dist/latest.yml', 'dist/win-unpacked/resources/app-update.yml')) {
-            if (!(Test-Path $file)) { throw "Missing update metadata: $file" }
-          }
-      - name: Exercise update download without installing
+          if (!(Test-Path dist/win-unpacked/resources/app-update.yml)) { throw 'Missing resources/app-update.yml' }
+      - name: Download the installer the way installed copies do
         run: ./app/node_modules/.bin/electron.cmd scripts/smoke-updater.cjs
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-release
+          name: TokenMaxxing-${{ steps.rev.outputs.tag }}-win
           path: |
-            dist/*.exe
-            dist/*.blockmap
+            dist/TokenMaxxing-Setup-${{ steps.rev.outputs.tag }}.exe
+            dist/TokenMaxxing-Setup-${{ steps.rev.outputs.tag }}.exe.blockmap
             dist/latest.yml
           if-no-files-found: error
-  publish:
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+          retention-days: 14
+
+  tag:
+    name: Tag vNNN on main
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Tag this commit with its revision
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TAG="$(python3 scripts/release_version.py --print-tag | tr -d '[:space:]')"
+          test -n "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # vNNN is the commit count, so an existing tag must already be ours.
+          if EXISTING="$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null)"; then
+            if [ "$EXISTING" != "$SHA" ]; then
+              echo "::error::$TAG already points at $EXISTING, not $SHA"
+              exit 1
+            fi
+            echo "$TAG already on $SHA"
+          else
+            gh api -X POST "repos/$GH_REPO/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$SHA" >/dev/null
+            echo "tagged $SHA as $TAG"
+          fi
+          echo "Tagged \`$TAG\` on \`$SHA\`." >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish the vNNN release
+    needs: [scope, pack, tag]
+    # A packed main commit (tagged above), or a pushed release tag; a manual run on a tag re-publishes.
+    if: >-
+      always() && needs.scope.outputs.app == 'true' && needs.pack.result == 'success' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      (startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && needs.tag.result == 'success'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
       - uses: actions/download-artifact@v4
         with:
-          name: windows-release
-          path: release
-      - name: Publish completed release
+          name: TokenMaxxing-${{ needs.pack.outputs.tag }}-win
+          path: dist-win
+      - name: Write the release notes
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.pack.outputs.tag }}
+          SHA: ${{ github.sha }}
         run: |
-          gh release create "$RELEASE_TAG" release/* --verify-tag --draft --title "TOKENMAXXING $RELEASE_TAG" --generate-notes
-          gh release edit "$RELEASE_TAG" --draft=false --latest
+          set -euo pipefail
+          # Main uses merge commits, so the notes come from the PR that merged this
+          # commit (its title and body); a direct push has none and uses its message.
+          PR="$(gh api "repos/$GH_REPO/commits/$SHA/pulls" --jq '[.[] | select(.merged_at != null)][0].number // empty' 2>/dev/null || true)"
+          if [ -n "$PR" ] && gh pr view "$PR" --json title,body --jq '.title + "\n\n" + (.body // "")' > "$RUNNER_TEMP/message.txt"; then
+            echo "notes from #$PR"
+          else
+            PR=""
+            git log -1 --format=%B HEAD > "$RUNNER_TEMP/message.txt"
+          fi
+          # Notes never block a release.
+          if ! python3 scripts/release_notes.py body --tag "$TAG" --message-file "$RUNNER_TEMP/message.txt" ${PR:+--pr "$PR"} > "$RUNNER_TEMP/notes.md"; then
+            echo "::warning::release notes for $TAG could not be written; publishing the installer text only"
+            printf 'TOKENMAXXING %s for Windows.\n\n- Installer: TokenMaxxing-Setup-%s.exe (NSIS, x64)\n' "$TAG" "$TAG" > "$RUNNER_TEMP/notes.md"
+          fi
+          cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Attach the installer and update feed to the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.pack.outputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_TAG: ${{ github.ref_name }}
+          COMMIT_TAG: ${{ needs.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # The pack refuses a mismatched tag; refuse it again before publishing.
+          if [ "$REF_TYPE" = tag ]; then test "$TAG" = "$REF_TAG"; else test "$TAG" = "$COMMIT_TAG"; fi
+          SETUP="dist-win/TokenMaxxing-Setup-${TAG}.exe"
+          test -f "$SETUP"
+          test -f "${SETUP}.blockmap"
+          test -f dist-win/latest.yml
+          NOTES="$RUNNER_TEMP/notes.md"
+          test -s "$NOTES"
+          # Runs don't queue behind each other, so an older commit's can finish last.
+          # Only the highest vNNN may become latest -- the release installed copies
+          # read -- or the feed would roll back.
+          NEWEST="$(gh release list --limit 100 --json tagName --jq '[.[].tagName | select(test("^v[0-9]+$")) | ltrimstr("v") | tonumber] | max // 0')"
+          LATEST=false
+          if [ "$((10#${TAG#v}))" -ge "$NEWEST" ]; then LATEST=true; fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$SETUP" "${SETUP}.blockmap" dist-win/latest.yml --clobber
+            gh release edit "$TAG" --notes-file "$NOTES"
+          else
+            gh release create "$TAG" "$SETUP" "${SETUP}.blockmap" dist-win/latest.yml \
+              --title "TOKENMAXXING $TAG" --notes-file "$NOTES" --verify-tag --latest="$LATEST"
+          fi
+          echo "Released \`$TAG\` (latest: $LATEST)." >> "$GITHUB_STEP_SUMMARY"

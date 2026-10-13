@@ -108,7 +108,7 @@ A built-in field guide to spending less: which Claude, Codex and Cursor model to
 2. Run it. Everything the app needs is bundled: no Python, Node.js or Git required.
 3. Open TOKENMAXXING. Accounts you are already signed into are picked up automatically.
 
-The app checks for new versions at startup and every six hours. When one is ready, **Restart to update** appears in the notifications panel; nothing installs until you choose it.
+Every change merged into `main` ships as a numbered release (`v042`, `v043`, …). The app checks 15 seconds after it opens and every two hours while it stays open, and downloads a new version in the background. The download resumes if your connection drops, and the file is checked before it's offered. When it's ready, the taskbar button flashes and **Restart to update** appears in the notifications panel. Nothing installs until you choose it; **Later** stops the reminder for that version. The panel lists what the update brings under **Restart to update**, and the first time a new version opens, a **What's new** card shows every release it brought. **Got it** puts the card away; **What's new** in the notifications panel brings it back. Update activity is logged to `%APPDATA%\TOKENMAXXING\logs\update.log`. Set `TOKENMAXXING_UPDATE_CHECK=0` to turn off automatic checks; **Check for updates** still works.
 
 > [!NOTE]
 > The installer isn't code-signed yet, so Windows SmartScreen may show an "unknown publisher" warning the first time you run it.
@@ -231,6 +231,8 @@ Settings and credentials live outside the installation, so they survive updates.
 app/main.js            Electron window and engine bridge
 app/preload.js         The narrow IPC surface the window can use
 app/provider-link.js   Official browser sign-in and connection status
+app/updates.js         In-app updates (rules in update-policy.js, download in update-download.js)
+app/whats-new.js       What's new card (notes from release-notes.js via release-notes-source.js)
 app/renderer/          The dashboard UI
 hud_bridge.py          NDJSON commands and data presentation
 cursor_usage.py        Cursor database and dashboard reads
@@ -251,9 +253,16 @@ node --test app/test-*.cjs
 <details>
 <summary><b>Building and releasing</b></summary>
 
-**Local Windows build:** install `scripts/requirements-build.txt` with Python 3.12, run `python scripts/build-engine.py`, then `npm ci` and `npm run dist:win` from `app/`. The installer lands in `dist/`.
+**Releases are automatic.** Each release is numbered by its commit count on `main`: `vNNN` publicly, packed as version `3.0.N` (`scripts/release_version.py`). Nobody edits a version line; `app/package.json` stays `0.0.0-dev`. The release workflow (`.github/workflows/release.yml`) runs on every pull request and push:
 
-**Release:** bump the version in `app/package.json` and its lockfile, commit, and push a matching tag such as `v2.2.0`. The release workflow runs the tests, bundles the Python engine, builds the NSIS installer and publishes it with its blockmap and `latest.yml`. Ordinary pushes to `main` don't release; a manual workflow run builds downloadable artifacts without publishing.
+1. It skips the build when only documentation changed (`scripts/ci_scope.py`).
+2. It runs both test suites, bundles the Python engine, and packs `TokenMaxxing-Setup-vNNN.exe`. It fails unless `latest.yml` names exactly that file and version (`scripts/pack_windows.py`).
+3. It downloads the installer through the real updater the way installed copies do, including a dropped connection (`scripts/smoke-updater.cjs`).
+4. On `main` it tags the commit `vNNN` and publishes the release with the installer, its blockmap and `latest.yml`. The notes come from the merged PR's `## What` section (`scripts/release_notes.py`). A release is marked latest only if no higher `vNNN` exists, so the update feed never rolls back.
+
+Pull request runs upload the installer as a workflow artifact without publishing. To re-run a publish: `gh workflow run release.yml --ref vNNN`.
+
+**Local Windows build:** install `scripts/requirements-build.txt` with Python 3.12, run `python scripts/build-engine.py`, then `npm ci` and `npm run dist:win` from `app/`. The installer, numbered from your checkout's history, lands in `dist/`.
 
 Windows installations without timezone data fall back to a built-in Eastern timezone; those tests don't require `tzdata`. The legacy `reset_schedule.py` utility remains for compatibility; its manual schedules are never used as quota evidence.
 
