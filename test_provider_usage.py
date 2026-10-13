@@ -166,6 +166,7 @@ class FetchClaudeTest(unittest.TestCase):
             "https://api.anthropic.com/api/oauth/usage", 401, "synthetic-test-secret", {}, io.BytesIO())
         result = pu._read_claude()
         self.assertEqual(result["status"], "unavailable")
+        self.assertTrue(result["needs_sign_in"])
         self.assertNotIn("synthetic-test-secret", json.dumps(result))
         self.assertEqual(opener.return_value.open.call_count, 1)
 
@@ -217,6 +218,33 @@ class CacheTest(unittest.TestCase):
             patcher = patch.object(pu, name, {})
             patcher.start()
             self.addCleanup(patcher.stop)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.saved = Path(folder.name) / "provider-last-good.json"
+        saved_patch = patch.object(pu, "_saved_path", return_value=self.saved)
+        saved_patch.start()
+        self.addCleanup(saved_patch.stop)
+
+    @patch.object(pu, "_read_claude")
+    @patch.object(pu, "_read_codex")
+    def test_a_restart_that_meets_a_rate_limit_shows_the_saved_reading(self, codex, claude):
+        codex.return_value, claude.return_value = self.ok(), self.ok_claude()
+        pu.get_provider_usage(force=True)
+        pu._last_good.clear()
+        pu._attempted.clear()
+        claude.return_value = pu._provider("claude", pu.CLAUDE_SOURCE, reason="limited", retry_after=300)
+        provider = pu.get_provider_usage(force=True)["providers"][1]
+        self.assertEqual(provider["status"], "ok")
+        self.assertEqual(provider["windows"][0]["used_percent"], 12)
+        self.assertEqual(provider["warning"], "limited")
+        self.assertNotIn("needs_sign_in", provider)
+
+    @patch.object(pu, "_read_claude")
+    @patch.object(pu, "_read_codex")
+    def test_only_a_sign_in_failure_asks_to_reconnect(self, codex, claude):
+        codex.return_value = self.ok()
+        claude.return_value = pu._provider("claude", pu.CLAUDE_SOURCE, reason="expired", needs_sign_in=True)
+        self.assertTrue(pu.get_provider_usage(force=True)["providers"][1]["needs_sign_in"])
 
     def ok_claude(self):
         return pu.normalize_claude({"five_hour": {"utilization": 12, "resets_at": time.time() + 3600}})

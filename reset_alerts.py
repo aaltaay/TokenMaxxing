@@ -27,12 +27,17 @@ def evaluate(snapshot, cfg, state, now):
             previous = tracked.get(key)
             kind = "weekly" if window.get("window_minutes") == 10080 else "session"
             enabled = cfg.get("buzz_enabled", True) and cfg.get("providers", {}).get(provider['id'], {}).get(f"{kind}_enabled", True)
-            def emit(phase, boundary, message):
-                eid = f"{key}:{phase}:{boundary}"
-                if enabled and eid not in sent:
-                    events.append(dict(id=eid, provider=provider['id'], kind=kind, phase=phase, message=message))
-                    sent[eid] = now
             label = f"{provider['label']} {window['label']}"
+
+            def emit(phase, boundary, message):
+                # Providers report the same reset a fraction of a second apart
+                # on each read; the minute identifies the boundary.
+                eid = f"{key}:{phase}:{round(boundary / 60)}"
+                if enabled and eid not in sent:
+                    events.append(dict(id=eid, provider=provider['id'], kind=kind, phase=phase, message=message,
+                                       label=label, provider_label=provider['label'], window_label=window['label'],
+                                       resets_at=reset, used_percent=window.get('used_percent')))
+                    sent[eid] = now
             # Passing a timer alone is not proof. A fresh response must move
             # this same provider window into the next period after its boundary.
             if isinstance(previous, dict) and number(previous.get('reset')) and previous['reset'] <= fetched and previous['reset'] < reset:

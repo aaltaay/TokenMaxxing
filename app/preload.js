@@ -2,6 +2,18 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
+// Set before first paint. Windows draws min/max/close over the right edge,
+// and the titlebar inset has to be there on the first frame or the pin and
+// refresh render underneath those buttons. Preload runs before <html> exists,
+// so the class goes on the moment the parser inserts it; touching
+// documentElement directly here threw and took window.hud down with it.
+const platformClass = process.platform === 'darwin' ? 'is-mac' : process.platform === 'win32' ? 'is-win' : 'is-linux';
+new MutationObserver((_records, observer) => {
+  if (!document.documentElement) return;
+  document.documentElement.classList.add(platformClass);
+  observer.disconnect();
+}).observe(document, { childList: true });
+
 // The renderer gets a narrow, named surface -- no ipcRenderer, no node.
 contextBridge.exposeInMainWorld('hud', {
   call: (cmd, args) => ipcRenderer.invoke('engine:call', cmd, args),

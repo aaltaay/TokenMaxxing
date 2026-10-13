@@ -232,7 +232,7 @@ function createWindow() {
     titleBarOverlay:
       process.platform === 'darwin'
         ? undefined
-        : { color: '#00000000', symbolColor: '#e9e9ee', height: 44 },
+        : { color: '#0c0c0f', symbolColor: '#e9e9ee', height: 44 },
     trafficLightPosition: { x: 18, y: 18 },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -280,7 +280,7 @@ ipcMain.handle('engine:call', async (_event, cmd, args) => {
   if (!bridge) throw new Error('engine not started');
   if (cmd === 'sessions') args = {...args, active_title: activeChat.currentTitle(args?.provider === 'claude' ? 'claude' : 'codex')};
   // The cycle fetch pages the dashboard and can legitimately run long.
-  const timeout = cmd === 'cycle' ? 180000 : cmd === 'providers' ? 45000 : 30000;
+  const timeout = cmd === 'cycle' ? 180000 : cmd === 'overview' ? 120000 : cmd === 'providers' ? 45000 : 30000;
   return bridge.call(cmd, args || {}, timeout);
 });
 
