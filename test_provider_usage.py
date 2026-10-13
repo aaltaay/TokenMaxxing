@@ -1,15 +1,59 @@
 """Quota regression tests: missing values never become a full or empty meter."""
+import base64
+import contextlib
 import io
 import json
+import os
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import provider_usage as pu
+
+# Synthetic credentials only: these strings must never appear in any result,
+# message, log line, or console output.
+OLD_ACCESS, OLD_REFRESH = "synthetic-old-access-secret", "synthetic-old-refresh-secret"
+NEW_ACCESS, NEW_REFRESH = "synthetic-new-access-secret", "synthetic-new-refresh-secret"
+OTHER_ACCESS, OTHER_REFRESH = "synthetic-other-access-secret", "synthetic-other-refresh-secret"
+SECRETS = (OLD_ACCESS, OLD_REFRESH, NEW_ACCESS, NEW_REFRESH, OTHER_ACCESS, OTHER_REFRESH, "mcp-secret")
+USAGE = {"five_hour": {"utilization": 12, "resets_at": None}}
+
+
+class FakeServer:
+    """Stands in for the token and usage endpoints; records every request."""
+
+    def __init__(self, token=(), usage=()):
+        self.replies = {pu.CLAUDE_TOKEN_URL: list(token), pu.CLAUDE_USAGE_URL: list(usage)}
+        self.requests = []
+
+    def open(self, req, timeout=None):
+        self.requests.append(req)
+        reply = self.replies[req.full_url].pop(0)
+        if callable(reply):
+            reply = reply(req)
+        if isinstance(reply, Exception):
+            raise reply
+        return io.BytesIO(json.dumps(reply).encode("utf-8"))
+
+    def urls(self):
+        return [req.full_url for req in self.requests]
+
+    def bearer(self, index):
+        return self.requests[index].get_header("Authorization")
+
+
+def refused(code=400, error="invalid_grant"):
+    # The provider's message deliberately echoes a secret: it must go nowhere.
+    body = json.dumps({"error": error, "error_description": f"bad {OLD_REFRESH}"}).encode()
+    return HTTPError(pu.CLAUDE_TOKEN_URL, code, f"refused {OLD_REFRESH}", {}, io.BytesIO(body))
+
+
+def granted(access=NEW_ACCESS, refresh=NEW_REFRESH, **extra):
+    return {"access_token": access, "refresh_token": refresh, "expires_in": 28800, **extra}
 
 
 class NormalizeCodexTest(unittest.TestCase):
@@ -139,11 +183,12 @@ class FetchClaudeTest(unittest.TestCase):
         self.assertEqual(result["windows"], [])
 
     @patch.object(pu.request, "build_opener")
-    def test_expired_credentials_are_not_refreshed(self, opener):
+    def test_expired_credentials_without_a_refresh_token_ask_for_sign_in(self, opener):
         self.credentials(expires=1)
         result = pu._read_claude()
         opener.assert_not_called()
         self.assertIn("expired", result["reason"])
+        self.assertTrue(result["needs_sign_in"])
         self.assertNotIn("synthetic-test-secret", json.dumps(result))
 
     @patch.object(pu.request, "build_opener")
@@ -169,6 +214,354 @@ class FetchClaudeTest(unittest.TestCase):
         self.assertTrue(result["needs_sign_in"])
         self.assertNotIn("synthetic-test-secret", json.dumps(result))
         self.assertEqual(opener.return_value.open.call_count, 1)
+
+
+class RenewClaudeTest(unittest.TestCase):
+    """The stored sign-in is renewed the way Claude Code renews it, so a
+    reboot after the access token lapsed never asks for a new sign-in."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        # A folder inside the temporary one, so the legacy lock beside it
+        # (<config>.lock) stays inside the test's own directory too.
+        self.config = Path(directory.name) / "claude"
+        self.config.mkdir()
+        self.path = self.config / ".credentials.json"
+        self.lock = self.config / ".oauth_refresh.lock"
+        self.legacy_lock = Path(directory.name) / "claude.lock"
+        environment = patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": str(self.config)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name, value in (("_refused", set()), ("_unsaved", {})):
+            patcher = patch.object(pu, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def write(self, access=OLD_ACCESS, refresh=OLD_REFRESH, expires_in=-60):
+        data = {
+            "claudeAiOauth": {
+                "accessToken": access, "refreshToken": refresh,
+                "expiresAt": int((time.time() + expires_in) * 1000),
+                "refreshTokenExpiresAt": 1893456000000,
+                "scopes": ["user:inference", "user:profile", "user:sessions:claude_code"],
+                "subscriptionType": "max", "rateLimitTier": "default_claude_max_20x",
+                "fieldFromANewerClaudeCode": {"kept": True},
+            },
+            "mcpOAuth": {"server|1": {"accessToken": "mcp-secret"}},
+            "someOtherTopLevelKey": [1, 2],
+        }
+        self.path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+        return data
+
+    def stored(self):
+        return json.loads(self.path.read_text(encoding="utf-8"))
+
+    def read(self, server):
+        with patch.object(pu.request, "build_opener", return_value=server) as opener:
+            result = pu._read_claude()
+        for call in opener.call_args_list:
+            self.assertEqual(call.args, (pu._NoRedirect,))
+        for secret in SECRETS:
+            self.assertNotIn(secret, json.dumps(result))
+        return result
+
+    def assert_no_leftovers(self):
+        self.assertFalse(self.lock.exists())
+        self.assertFalse(self.legacy_lock.exists())
+        self.assertEqual(sorted(p.name for p in self.config.iterdir()), [".credentials.json"])
+
+    def test_expired_token_is_renewed_and_written_back_with_everything_else_kept(self):
+        before = self.write()
+        server = FakeServer(token=[granted(refresh_token_expires_in=2419200,
+                                           scope="user:inference user:profile")], usage=[USAGE])
+        started = time.time()
+        result = self.read(server)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(server.urls(), [pu.CLAUDE_TOKEN_URL, pu.CLAUDE_USAGE_URL])
+        grant = server.requests[0]
+        self.assertEqual(grant.get_method(), "POST")
+        self.assertEqual(grant.get_header("Content-type"), "application/json")
+        self.assertEqual(json.loads(grant.data), {
+            "grant_type": "refresh_token", "refresh_token": OLD_REFRESH,
+            "client_id": pu.CLAUDE_CLIENT_ID,
+            "scope": "user:inference user:profile user:sessions:claude_code"})
+        self.assertEqual(server.bearer(1), f"Bearer {NEW_ACCESS}")
+        raw = self.path.read_text(encoding="utf-8")
+        self.assertNotIn(": ", raw)  # Claude Code's compact layout
+        after = json.loads(raw)
+        self.assertEqual(list(after), list(before))
+        self.assertEqual(list(after["claudeAiOauth"]), list(before["claudeAiOauth"]))
+        auth = after["claudeAiOauth"]
+        self.assertEqual((auth["accessToken"], auth["refreshToken"]), (NEW_ACCESS, NEW_REFRESH))
+        self.assertAlmostEqual(auth["expiresAt"] / 1000, started + 28800, delta=5)
+        self.assertIsInstance(auth["expiresAt"], int)
+        self.assertAlmostEqual(auth["refreshTokenExpiresAt"] / 1000, started + 2419200, delta=5)
+        self.assertEqual(auth["scopes"], ["user:inference", "user:profile"])
+        for kept in ("subscriptionType", "rateLimitTier", "fieldFromANewerClaudeCode"):
+            self.assertEqual(auth[kept], before["claudeAiOauth"][kept])
+        self.assertEqual(after["mcpOAuth"], before["mcpOAuth"])
+        self.assertEqual(after["someOtherTopLevelKey"], [1, 2])
+        self.assert_no_leftovers()
+
+    def test_a_reply_without_a_new_refresh_token_keeps_the_one_on_file(self):
+        before = self.write()
+        reply = {"access_token": NEW_ACCESS, "expires_in": 3600}
+        self.assertEqual(self.read(FakeServer(token=[reply], usage=[USAGE]))["status"], "ok")
+        auth = self.stored()["claudeAiOauth"]
+        self.assertEqual((auth["accessToken"], auth["refreshToken"]), (NEW_ACCESS, OLD_REFRESH))
+        self.assertEqual(auth["refreshTokenExpiresAt"], before["claudeAiOauth"]["refreshTokenExpiresAt"])
+        self.assertEqual(auth["scopes"], before["claudeAiOauth"]["scopes"])
+
+    def test_a_token_that_is_still_good_is_not_renewed(self):
+        before = self.write(expires_in=3600)
+        server = FakeServer(usage=[USAGE])
+        self.assertEqual(self.read(server)["status"], "ok")
+        self.assertEqual(server.urls(), [pu.CLAUDE_USAGE_URL])
+        self.assertEqual(self.stored(), before)
+
+    def test_a_token_about_to_lapse_is_renewed_before_it_does(self):
+        self.write(expires_in=pu.RENEW_MARGIN - 30)
+        server = FakeServer(token=[granted()], usage=[USAGE])
+        self.read(server)
+        self.assertEqual(server.urls(), [pu.CLAUDE_TOKEN_URL, pu.CLAUDE_USAGE_URL])
+
+    def test_no_renewal_when_another_process_already_renewed_it(self):
+        self.write()
+        enter = pu._RefreshLock.__enter__
+
+        def claude_code_renews_first(lock):
+            # Claude Code renewed between this read and taking the lock.
+            self.write(access=OTHER_ACCESS, refresh=OTHER_REFRESH, expires_in=28800)
+            return enter(lock)
+
+        server = FakeServer(usage=[USAGE])
+        with patch.object(pu._RefreshLock, "__enter__", autospec=True, side_effect=claude_code_renews_first):
+            result = self.read(server)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(server.urls(), [pu.CLAUDE_USAGE_URL])
+        self.assertEqual(server.bearer(0), f"Bearer {OTHER_ACCESS}")
+        self.assertEqual(self.stored()["claudeAiOauth"]["refreshToken"], OTHER_REFRESH)
+        self.assert_no_leftovers()
+
+    def test_a_sign_in_written_during_the_renewal_is_never_overwritten(self):
+        self.write()
+
+        def signed_in_meanwhile(req):
+            # `claude auth login` does not take the refresh lock.
+            self.write(access=OTHER_ACCESS, refresh=OTHER_REFRESH, expires_in=28800)
+            return granted()
+
+        server = FakeServer(token=[signed_in_meanwhile], usage=[USAGE])
+        self.assertEqual(self.read(server)["status"], "ok")
+        auth = self.stored()["claudeAiOauth"]
+        self.assertEqual((auth["accessToken"], auth["refreshToken"]), (OTHER_ACCESS, OTHER_REFRESH))
+        self.assert_no_leftovers()
+
+    def test_waits_for_claude_code_holding_the_lock_and_uses_its_renewal(self):
+        self.write()
+        self.lock.mkdir()
+
+        def claude_code_finishes(seconds):
+            self.write(access=OTHER_ACCESS, refresh=OTHER_REFRESH, expires_in=28800)
+            self.lock.rmdir()
+
+        server = FakeServer(usage=[USAGE])
+        with patch.object(pu.time, "sleep", side_effect=claude_code_finishes) as sleep:
+            result = self.read(server)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(sleep.call_count, 1)
+        self.assertEqual(server.urls(), [pu.CLAUDE_USAGE_URL])
+        self.assertEqual(server.bearer(0), f"Bearer {OTHER_ACCESS}")
+
+    def test_a_lock_held_throughout_is_left_alone_and_is_not_a_sign_in_problem(self):
+        before = self.write()
+        self.legacy_lock.mkdir()
+        server = FakeServer()
+        with patch.object(pu.time, "sleep"):
+            result = self.read(server)
+        self.assertEqual(result["status"], "unavailable")
+        self.assertNotIn("needs_sign_in", result)
+        self.assertEqual(server.requests, [])
+        self.assertTrue(self.legacy_lock.is_dir())
+        self.assertFalse(self.lock.exists())
+        self.assertEqual(self.stored(), before)
+        self.legacy_lock.rmdir()
+
+    def test_a_lock_abandoned_by_a_dead_process_is_taken_over(self):
+        self.write()
+        self.lock.mkdir()
+        old = time.time() - pu.LOCK_STALE_SECONDS - 60
+        os.utime(self.lock, (old, old))
+        server = FakeServer(token=[granted()], usage=[USAGE])
+        self.assertEqual(self.read(server)["status"], "ok")
+        self.assertEqual(self.stored()["claudeAiOauth"]["accessToken"], NEW_ACCESS)
+        self.assert_no_leftovers()
+
+    def test_a_refused_refresh_token_asks_for_sign_in_once_and_is_not_offered_again(self):
+        self.write()
+        before = self.path.read_bytes()
+        server = FakeServer(token=[refused()])
+        result = self.read(server)
+        self.assertEqual(result["status"], "unavailable")
+        self.assertTrue(result["needs_sign_in"])
+        self.assertEqual(result["reason"], pu.EXPIRED)
+        self.assertEqual(self.path.read_bytes(), before)
+        again = self.read(server)
+        self.assertTrue(again["needs_sign_in"])
+        self.assertEqual(len(server.requests), 1)
+        self.assert_no_leftovers()
+
+    def test_a_new_sign_in_after_a_refusal_is_renewed_again(self):
+        self.write()
+        self.read(FakeServer(token=[refused(401)]))
+        self.write(access=OTHER_ACCESS, refresh=OTHER_REFRESH)
+        server = FakeServer(token=[granted()], usage=[USAGE])
+        self.assertEqual(self.read(server)["status"], "ok")
+        self.assertEqual(json.loads(server.requests[0].data)["refresh_token"], OTHER_REFRESH)
+
+    def test_a_network_failure_while_renewing_is_not_a_sign_in_problem(self):
+        self.write()
+        before = self.path.read_bytes()
+        for failure in (URLError(f"offline {OLD_REFRESH}"), TimeoutError(), refused(503, "unavailable"),
+                        lambda req: {"error": "no token here"}):
+            with self.subTest(failure=failure):
+                server = FakeServer(token=[failure])
+                result = self.read(server)
+                self.assertEqual(result["status"], "unavailable")
+                self.assertNotIn("needs_sign_in", result)
+                self.assertIn("renewed", result["reason"])
+                self.assertEqual(self.path.read_bytes(), before)
+                self.assertEqual(len(server.requests), 1)
+        self.assert_no_leftovers()
+
+    def test_a_token_refused_before_its_expiry_is_renewed_once_and_asked_again(self):
+        self.write(expires_in=3600)
+        withdrawn = HTTPError(pu.CLAUDE_USAGE_URL, 401, "expired", {}, io.BytesIO())
+        server = FakeServer(token=[granted()], usage=[withdrawn, USAGE])
+        self.assertEqual(self.read(server)["status"], "ok")
+        self.assertEqual(server.urls(), [pu.CLAUDE_USAGE_URL, pu.CLAUDE_TOKEN_URL, pu.CLAUDE_USAGE_URL])
+        self.assertEqual(server.bearer(2), f"Bearer {NEW_ACCESS}")
+        self.assertEqual(self.stored()["claudeAiOauth"]["accessToken"], NEW_ACCESS)
+
+    def test_a_renewed_token_that_is_still_refused_asks_for_sign_in_without_looping(self):
+        self.write(expires_in=3600)
+        withdrawn = lambda req: HTTPError(pu.CLAUDE_USAGE_URL, 401, "no", {}, io.BytesIO())
+        server = FakeServer(token=[granted()], usage=[withdrawn, withdrawn])
+        result = self.read(server)
+        self.assertTrue(result["needs_sign_in"])
+        self.assertEqual(server.urls(), [pu.CLAUDE_USAGE_URL, pu.CLAUDE_TOKEN_URL, pu.CLAUDE_USAGE_URL])
+        # Renewed because it had lapsed, then refused anyway: not renewed twice.
+        self.write(access=OTHER_ACCESS, refresh=OTHER_REFRESH)
+        server = FakeServer(token=[granted()], usage=[withdrawn])
+        self.assertTrue(self.read(server)["needs_sign_in"])
+        self.assertEqual(server.urls(), [pu.CLAUDE_TOKEN_URL, pu.CLAUDE_USAGE_URL])
+
+    def test_a_failed_write_leaves_the_file_whole_and_the_renewal_is_written_next_time(self):
+        self.write()
+        before = self.path.read_bytes()
+        with patch.object(pu.os, "replace", side_effect=PermissionError("in use")), \
+                patch.object(pu.time, "sleep"):
+            result = self.read(FakeServer(token=[granted()], usage=[USAGE]))
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assert_no_leftovers()
+        # The provider may have retired the old refresh token: the renewal is
+        # written back on the next read instead of being requested again.
+        server = FakeServer(usage=[USAGE])
+        self.assertEqual(self.read(server)["status"], "ok")
+        self.assertEqual(server.urls(), [pu.CLAUDE_USAGE_URL])
+        self.assertEqual(server.bearer(0), f"Bearer {NEW_ACCESS}")
+        auth = self.stored()["claudeAiOauth"]
+        self.assertEqual((auth["accessToken"], auth["refreshToken"]), (NEW_ACCESS, NEW_REFRESH))
+        self.assertEqual(pu._unsaved, {})
+
+    def test_a_write_interrupted_midway_never_touches_the_file(self):
+        self.write()
+        before = self.path.read_bytes()
+        with patch.object(pu.os, "fsync", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                pu._write_credentials(self.path, {"claudeAiOauth": {"accessToken": NEW_ACCESS}})
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(sorted(p.name for p in self.config.iterdir()), [".credentials.json"])
+
+    def test_no_secret_reaches_logs_or_the_console(self):
+        self.write()
+        out, err = io.StringIO(), io.StringIO()
+        with self.assertNoLogs(level="DEBUG"), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            results = [self.read(FakeServer(token=[URLError(f"offline {OLD_REFRESH}")])),
+                       # Malformed: an access token with no lifetime is not used.
+                       self.read(FakeServer(token=[lambda req: {"access_token": NEW_ACCESS}])),
+                       self.read(FakeServer(token=[refused()])),
+                       self.read(FakeServer())]
+        text = json.dumps(results) + out.getvalue() + err.getvalue()
+        for secret in SECRETS:
+            self.assertNotIn(secret, text)
+
+
+class AccountTest(unittest.TestCase):
+    """Plan and email are read from local files, never requested."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        environment = patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": str(self.root),
+                                                "CODEX_HOME": str(self.root / "codex")})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def claude(self, auth=None, account=None):
+        (self.root / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": OLD_ACCESS, "refreshToken": OLD_REFRESH, **(auth or {})}}), encoding="utf-8")
+        if account is not None:
+            (self.root / ".claude.json").write_text(json.dumps({"oauthAccount": account}), encoding="utf-8")
+
+    def codex(self, claims):
+        def part(value):
+            return base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+        (self.root / "codex").mkdir(exist_ok=True)
+        (self.root / "codex" / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {
+            "id_token": f"{part({'alg': 'none'})}.{part(claims)}.signature",
+            "access_token": OLD_ACCESS, "refresh_token": OLD_REFRESH}}), encoding="utf-8")
+
+    @patch.object(pu.request, "build_opener")
+    def test_claude_plan_size_and_email(self, opener):
+        cases = [
+            ({"subscriptionType": "max", "rateLimitTier": "default_claude_max_20x"}, {}, "Max 20x"),
+            ({"subscriptionType": "max", "rateLimitTier": "default_claude_max_5x"}, {}, "Max 5x"),
+            ({"subscriptionType": "max"}, {"userRateLimitTier": "default_claude_max_5x"}, "Max 5x"),
+            ({"subscriptionType": "max"}, {}, "Max"),
+            ({"subscriptionType": "pro", "rateLimitTier": "default_claude_ai"}, {}, "Pro"),
+            ({}, {"organizationType": "claude_team"}, "Team"),
+            ({"subscriptionType": "something_new"}, {"planDisplayName": "Claude Ultra"}, "Ultra"),
+            ({}, {}, None),
+        ]
+        for auth, account, plan in cases:
+            with self.subTest(plan=plan, auth=auth):
+                self.claude(auth, {"emailAddress": "person@example.com", **account})
+                self.assertEqual(pu.claude_account(), {"plan": plan, "email": "person@example.com"})
+        opener.assert_not_called()
+
+    def test_claude_signed_out_has_no_plan_or_email(self):
+        self.assertEqual(pu.claude_account(), {"plan": None, "email": None})
+
+    def test_codex_plan_and_email_from_the_stored_id_token(self):
+        for kind, plan in (("plus", "Plus"), ("pro", "Pro"), ("prolite", "Pro Lite"), ("team", "Team"),
+                           ("free", "Free"), ("something_new", None), (None, None)):
+            with self.subTest(kind=kind):
+                self.codex({"email": "person@example.com",
+                            "https://api.openai.com/auth": {"chatgpt_plan_type": kind}})
+                self.assertEqual(pu.codex_account(), {"plan": plan, "email": "person@example.com"})
+
+    def test_codex_missing_or_malformed_sign_in_is_unknown(self):
+        self.assertEqual(pu.codex_account(), {"plan": None, "email": None})
+        (self.root / "codex").mkdir()
+        for content in ("not json", json.dumps({"tokens": {"id_token": "no-dots"}}),
+                        json.dumps({"tokens": {"id_token": "a.!!!.c"}}), json.dumps({"OPENAI_API_KEY": "x"})):
+            with self.subTest(content=content):
+                (self.root / "codex" / "auth.json").write_text(content, encoding="utf-8")
+                self.assertEqual(pu.codex_account(), {"plan": None, "email": None})
 
 
 class FetchCodexTest(unittest.TestCase):
@@ -220,10 +613,37 @@ class CacheTest(unittest.TestCase):
             self.addCleanup(patcher.stop)
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
-        self.saved = Path(folder.name) / "provider-last-good.json"
+        self.folder = Path(folder.name)
+        self.saved = self.folder / "provider-last-good.json"
         saved_patch = patch.object(pu, "_saved_path", return_value=self.saved)
         saved_patch.start()
         self.addCleanup(saved_patch.stop)
+        # Plan and email come from account files: never this machine's own.
+        environment = patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": str(self.folder),
+                                                "CODEX_HOME": str(self.folder / "codex")})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    @patch.object(pu, "_read_claude")
+    @patch.object(pu, "_read_codex")
+    def test_each_provider_carries_its_plan_and_email_which_are_not_saved_to_disk(self, codex, claude):
+        (self.folder / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": OLD_ACCESS, "subscriptionType": "max",
+            "rateLimitTier": "default_claude_max_20x"}}), encoding="utf-8")
+        (self.folder / ".claude.json").write_text(json.dumps({"oauthAccount": {
+            "emailAddress": "claude-person@example.com"}}), encoding="utf-8")
+        codex.return_value, claude.return_value = self.ok(), self.ok_claude()
+        providers = pu.get_provider_usage(force=True)["providers"]
+        self.assertEqual([(p["id"], p["plan"], p["email"]) for p in providers],
+                         [("codex", None, None), ("claude", "Max 20x", "claude-person@example.com")])
+        self.assertEqual(pu.peek_provider_usage()["providers"][1]["plan"], "Max 20x")
+        saved = self.saved.read_text(encoding="utf-8")
+        self.assertNotIn("claude-person@example.com", saved)
+        self.assertNotIn(OLD_ACCESS, json.dumps(providers) + saved)
+        # A held reading after a failure still says whose account it is.
+        claude.return_value = pu._provider("claude", pu.CLAUDE_SOURCE, reason="offline")
+        held = pu.get_provider_usage(force=True)["providers"][1]
+        self.assertEqual((held["warning"], held["plan"]), ("offline", "Max 20x"))
 
     @patch.object(pu, "_read_claude")
     @patch.object(pu, "_read_codex")

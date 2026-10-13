@@ -2,6 +2,10 @@
 
 // Official CLI browser sign-in only. This module does not read credentials,
 // print CLI output, submit model requests, or accept commands from the renderer.
+// It is needed once per account, not once per boot: the engine renews Claude's
+// eight-hour access token with the stored refresh token (provider_usage.py),
+// and Codex renews its own. Reconnect is for a first sign-in, or for when the
+// provider refuses the stored sign-in.
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -34,6 +38,35 @@ function findNode(directories) {
   const candidates = directories.map(dir => path.join(dir, filename));
   if (path.basename(process.execPath).toLowerCase() === filename) candidates.unshift(process.execPath);
   return candidates.find(fileExists) || null;
+}
+
+function newestFirst(a, b) {
+  const left = a.split('.').map(Number), right = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    const difference = (right[i] || 0) - (left[i] || 0);
+    if (difference) return difference;
+  }
+  return 0;
+}
+
+function desktopClaude(env = process.env) {
+  // The Claude desktop app keeps its own copy of the official CLI for its Code
+  // tab, one folder per version: Claude\claude-code\<version>\<build>\claude.exe.
+  // Someone who only uses the desktop app has no other copy to sign in with.
+  if (process.platform !== 'win32' || !env.APPDATA) return null;
+  const root = path.join(env.APPDATA, 'Claude', 'claude-code');
+  const found = [];
+  try {
+    for (const version of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!version.isDirectory() || !/^\d+(?:\.\d+)*$/.test(version.name)) continue;
+      for (const build of fs.readdirSync(path.join(root, version.name), { withFileTypes: true })) {
+        const file = path.join(root, version.name, build.name, 'claude.exe');
+        if (build.isDirectory() && fileExists(file)) found.push({ file, version: version.name });
+      }
+    }
+  } catch { return null; }
+  found.sort((a, b) => newestFirst(a.version, b.version));
+  return found[0]?.file || null;
 }
 
 function discoverCli(provider) {
@@ -71,7 +104,8 @@ function discoverCli(provider) {
     const script = scripts.find(fileExists);
     if (script) return { command: node, args: [script] };
   }
-  return null;
+  const bundled = provider === 'claude' ? desktopClaude() : null;
+  return bundled ? { command: bundled, args: [] } : null;
 }
 
 function allowedAuthUrl(provider, input) {
@@ -255,4 +289,4 @@ class ProviderLinkManager {
   }
 }
 
-module.exports = { ProviderLinkManager, discoverCli, allowedAuthUrl, extractAuthUrl, INSTALL_URLS };
+module.exports = { ProviderLinkManager, discoverCli, desktopClaude, allowedAuthUrl, extractAuthUrl, INSTALL_URLS };

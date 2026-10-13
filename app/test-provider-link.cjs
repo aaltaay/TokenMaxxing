@@ -2,7 +2,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { ProviderLinkManager, allowedAuthUrl, extractAuthUrl, INSTALL_URLS } = require('./provider-link');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { ProviderLinkManager, discoverCli, desktopClaude, allowedAuthUrl, extractAuthUrl, INSTALL_URLS } =
+  require('./provider-link');
 
 function child() {
   const value = new EventEmitter();
@@ -178,3 +182,40 @@ test('Every provider state revision increases across events and repeat sign-in a
   assert.deepEqual(events.map(state => state.revision), [1, 2, 3, 4, 5]);
   manager.dispose();
 });
+
+function withEnvironment(t, changes) {
+  const before = {};
+  for (const [name, value] of Object.entries(changes)) {
+    before[name] = process.env[name];
+    process.env[name] = value;
+  }
+  t.after(() => {
+    for (const [name, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  });
+}
+
+test('With only the Claude desktop app installed, Reconnect uses its bundled CLI, newest version first',
+  { skip: process.platform !== 'win32' }, t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-link-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    withEnvironment(t, { APPDATA: root, LOCALAPPDATA: root, USERPROFILE: root, HOME: root, PATH: '' });
+    assert.equal(desktopClaude(), null);
+    assert.equal(discoverCli('claude'), null);
+    for (const [version, build] of [['2.1.9', 'a1'], ['2.1.10', 'b2'], ['not-a-version', 'c3']]) {
+      const folder = path.join(root, 'Claude', 'claude-code', version, build);
+      fs.mkdirSync(folder, { recursive: true });
+      fs.writeFileSync(path.join(folder, 'claude.exe'), '');
+    }
+    fs.mkdirSync(path.join(root, 'Claude', 'claude-code', '2.2.0', 'empty'), { recursive: true });
+    const newest = path.join(root, 'Claude', 'claude-code', '2.1.10', 'b2', 'claude.exe');
+    assert.deepEqual(discoverCli('claude'), { command: newest, args: [] });
+    // Codex never borrows Claude's copy.
+    assert.equal(discoverCli('codex'), null);
+    // A standalone install still wins over the desktop app's copy.
+    const standalone = path.join(root, '.local', 'bin', 'claude.exe');
+    fs.mkdirSync(path.dirname(standalone), { recursive: true });
+    fs.writeFileSync(standalone, '');
+    assert.deepEqual(discoverCli('claude'), { command: standalone, args: [] });
+  });
