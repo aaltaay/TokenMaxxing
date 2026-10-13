@@ -71,12 +71,37 @@
       <div class="bell-update">
         <span id="updateStatus" role="status" aria-live="polite">Checking app version…</span>
         <span class="bell-update-actions">
+          <button class="chip" id="btnWhatsNew" type="button" hidden>What's new</button>
           <button class="chip" id="btnUpdateLater" type="button" hidden>Later</button>
           <button class="chip" id="btnUpdate" type="button">Check for updates</button>
         </span>
       </div>
+      <div class="bell-update-notes" id="updateNotes" hidden>
+        <span class="kicker" id="updateNotesTitle">What's new</span>
+        <div id="updateNotesList"></div>
+      </div>
     </div>
   </div>
+
+  <!-- What's new: what the last update brought. A floating card, never a modal
+       and never focused, so the app stays usable while it is open. -->
+  <section class="whats-new" id="whatsNew" aria-labelledby="whatsNewTitle" hidden>
+    <header class="whats-new-head">
+      <div>
+        <span class="kicker">TOKENMAXXING</span>
+        <h2 id="whatsNewTitle">What's new</h2>
+        <p class="whats-new-sub" id="whatsNewSubtitle"></p>
+      </div>
+      <button class="icon-btn" id="whatsNewClose" type="button" title="Close" aria-label="Close What's new">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </header>
+    <div class="whats-new-body" id="whatsNewBody"></div>
+    <footer class="whats-new-foot">
+      <button class="chip chip-primary" id="whatsNewGotIt" type="button">Got it</button>
+    </footer>
+  </section>
 
   <main class="views">
 
@@ -534,6 +559,8 @@
 </dialog>
 
 <script src="app.js"></script>
+<script src="release-notes.js"></script>
 <script src="updates.js"></script>
+<script src="whats-new.js"></script>
 </body>
 </html>

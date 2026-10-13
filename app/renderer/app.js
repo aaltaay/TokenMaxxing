@@ -2027,6 +2027,8 @@ async function boot() {
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && bellOpen()) setBellOpen(false);
   });
+  // What's new opens a card of its own (renderer/whats-new.js); the panel steps out of its way.
+  $('btnWhatsNew').addEventListener('click', () => setBellOpen(false));
   window.hud.on('updateStatus', (value) => { state.update = value; renderBell(); });
   window.hud.updateStatus().then((value) => { state.update = value; renderBell(); }).catch(() => {});
 

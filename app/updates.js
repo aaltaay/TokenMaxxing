@@ -12,9 +12,16 @@
  * until that click: not on quit, not on a timer. Restart to update stops the
  * usage engine first and installs nothing unless the engine is confirmed stopped.
  *
+ * Once a newer release is found, its release notes (and those of every release
+ * between it and this one) load through `notesSource` (release-notes-source.js),
+ * so the ready row can say what Restart to update brings. The view carries them
+ * as `notes` while they belong to the release on offer.
+ *
  * Every failure is logged and swallowed: the app keeps running on the version it has.
  */
 const policy = require('./update-policy');
+const {updateRange} = require('./release-notes');
+const {LOADING_NOTES} = require('./release-notes-source');
 const {downloadRelease} = require('./update-download');
 
 const noop = () => {};
@@ -22,7 +29,8 @@ const quietLogger = {info: noop, warn: noop, error: noop, debug: noop};
 
 class Updates {
   constructor({updater, gate, version, fetch, logger = quietLogger, publish = noop, attention = noop,
-    setProgress = noop, stopEngine = async () => true, restartEngine = async () => {}, now = Date.now, sleep}) {
+    setProgress = noop, stopEngine = async () => true, restartEngine = async () => {}, now = Date.now, sleep,
+    notesSource = null}) {
     this.updater = gate?.updater ? updater || null : null;
     this.gate = this.updater ? gate
       : {updater: false, automatic: false, reason: gate?.reason || 'the updater could not load'};
@@ -32,6 +40,8 @@ class Updates {
     this.hooks = {publish, attention, setProgress, stopEngine, restartEngine};
     this.now = now;
     this.sleep = sleep;
+    this.notesSource = notesSource;
+    this.notes = null; // {through, payload} for the release the notes were loaded for
     this.state = policy.INITIAL_UPDATE_STATE;
     this.pending = null;
     this.lastCheckAt = 0;
@@ -56,13 +66,37 @@ class Updates {
   }
 
   get view() {
-    return policy.updateView(this.state, {gate: this.gate, installedVersion: this.version});
+    const view = policy.updateView(this.state, {gate: this.gate, installedVersion: this.version});
+    return {...view, notes: this.notes && this.notes.through === view.version ? this.notes.payload : null};
   }
 
   dispatch(event) {
     this.state = policy.reduceUpdateState(this.state, event);
+    this.loadNotes(event);
     this.hooks.setProgress(policy.taskbarProgress(this.state));
     this.hooks.publish(this.view);
+  }
+
+  /**
+   * Once per release found: the notes of everything it brings, published when they
+   * arrive. A load that failed tries again when the release is found again or has
+   * just downloaded (the connection works), never on every progress tick.
+   */
+  loadNotes(event) {
+    const range = updateRange({installed: policy.displayTag(this.version), available: policy.displayTag(this.state.version)});
+    if (!this.notesSource || !range) return;
+    const retry = Boolean(this.notes?.payload?.error) && ['available', 'downloaded'].includes(event?.type);
+    if (this.notes?.through === range.through && !retry) return;
+    const notes = {through: range.through, payload: LOADING_NOTES};
+    this.notes = notes;
+    Promise.resolve()
+      .then(() => this.notesSource.load(range))
+      .catch(err => ({...LOADING_NOTES, loading: false, error: `Release notes could not be loaded: ${policy.errorText(err)}`}))
+      .then(payload => {
+        if (this.notes !== notes) return; // a newer release replaced it
+        notes.payload = payload;
+        this.hooks.publish(this.view);
+      });
   }
 
   onError(err) {

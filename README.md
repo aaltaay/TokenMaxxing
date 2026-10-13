@@ -108,7 +108,7 @@ A built-in field guide to spending less: which Claude, Codex and Cursor model to
 2. Run it. Everything the app needs is bundled: no Python, Node.js or Git required.
 3. Open TOKENMAXXING. Accounts you are already signed into are picked up automatically.
 
-Every change merged into `main` ships as a numbered release (`v042`, `v043`, …). The app checks 15 seconds after it opens and every two hours while it stays open, and downloads a new version in the background. The download resumes if your connection drops, and the file is checked before it's offered. When it's ready, the taskbar button flashes and **Restart to update** appears in the notifications panel. Nothing installs until you choose it; **Later** stops the reminder for that version. Update activity is logged to `%APPDATA%\TOKENMAXXING\logs\update.log`. Set `TOKENMAXXING_UPDATE_CHECK=0` to turn off automatic checks; **Check for updates** still works.
+Every change merged into `main` ships as a numbered release (`v042`, `v043`, …). The app checks 15 seconds after it opens and every two hours while it stays open, and downloads a new version in the background. The download resumes if your connection drops, and the file is checked before it's offered. When it's ready, the taskbar button flashes and **Restart to update** appears in the notifications panel. Nothing installs until you choose it; **Later** stops the reminder for that version. The panel lists what the update brings under **Restart to update**, and the first time a new version opens, a **What's new** card shows every release it brought. **Got it** puts the card away; **What's new** in the notifications panel brings it back. Update activity is logged to `%APPDATA%\TOKENMAXXING\logs\update.log`. Set `TOKENMAXXING_UPDATE_CHECK=0` to turn off automatic checks; **Check for updates** still works.
 
 > [!NOTE]
 > The installer isn't code-signed yet, so Windows SmartScreen may show an "unknown publisher" warning the first time you run it.
@@ -232,6 +232,7 @@ app/main.js            Electron window and engine bridge
 app/preload.js         The narrow IPC surface the window can use
 app/provider-link.js   Official browser sign-in and connection status
 app/updates.js         In-app updates (rules in update-policy.js, download in update-download.js)
+app/whats-new.js       What's new card (notes from release-notes.js via release-notes-source.js)
 app/renderer/          The dashboard UI
 hud_bridge.py          NDJSON commands and data presentation
 cursor_usage.py        Cursor database and dashboard reads
