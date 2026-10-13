@@ -16,7 +16,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 CACHE_TTL_S = 180
@@ -371,13 +371,23 @@ def cloud_agent_names(con: sqlite3.Connection) -> dict[str, str]:
     return out
 
 
+def is_grok_bot(model) -> bool:
+    return str(model).startswith("grok-bot")
+
+
+def is_subagent(cid) -> bool:
+    """Grok Bot's subagents (its automations and computer-use runs among
+    them) get conversation ids of their own with this prefix."""
+    return str(cid).startswith("sand-subagent-")
+
+
 def label_conversation(cid: str, models: dict, local: dict[str, str], cloud: dict[str, str]) -> str:
     if cid in local:
         return local[cid]
     if cid in cloud:
         return f"Cloud: {cloud[cid]}"
     model_names = list(models)
-    if model_names and all(str(m).startswith("grok-bot") for m in model_names):
+    if model_names and all(is_grok_bot(m) for m in model_names):
         return "Grok Bot session"
     if str(cid).startswith("bc-"):
         return f"Cloud agent {cid[3:11]}"
@@ -466,14 +476,17 @@ def _event_summaries(events: list[dict], local: dict, cloud: dict,
     by_model, by_day, by_conv = {}, {}, {}
     headless, interactive, unclassified = ({"n": 0, "cents": 0.0} for _ in range(3))
     # The minutes requests happened in, for time-at-the-keyboard and agent time.
-    minutes = {"interactive": set(), "headless": set()}
+    # Subagents a chat spawns work on their own: agent time, not yours.
+    minutes = {"interactive": set(), "headless": set(), "subagent": set()}
     for ev in events:
         tu = ev.get("tokenUsage") or {}
         cents = _event_cents(ev)
         model = ev.get("model") or "Unknown model"
         ts = iso_to_ms(ev.get("timestamp"))
         if ts is not None:
-            minutes["headless" if ev.get("isHeadless") is True else "interactive"].add(int(ts // 60000) * 60)
+            kind = ("subagent" if is_subagent(ev.get("conversationId")) else
+                    "headless" if ev.get("isHeadless") is True else "interactive")
+            minutes[kind].add(int(ts // 60000) * 60)
         try:
             day = datetime.fromtimestamp(ts / 1000).astimezone().strftime("%Y-%m-%d") if ts is not None else "Unknown date"
         except (OSError, ValueError, OverflowError):
@@ -491,7 +504,9 @@ def _event_summaries(events: list[dict], local: dict, cloud: dict,
             cid = str(ev.get("cloudAgentId") or "(none)")
         c = by_conv.setdefault(cid, {"n": 0, "cents": 0.0, "in": 0,
             "out": 0, "cr": 0, "headless": 0, "models": {},
-            "other_cents": None, "cursor_cents": None})
+            "other_cents": None, "cursor_cents": None, "last_at": None})
+        if ts is not None:
+            c["last_at"] = max(c["last_at"] or 0, ts / 1000)
         for target in (m, d, c):
             target["n"] += 1
             for key, value in metrics.items():
@@ -513,7 +528,8 @@ def _event_summaries(events: list[dict], local: dict, cloud: dict,
         # Counts cannot claim all headless/interactive activity when flags are absent.
         headless = interactive = {"n": None, "cents": None}
     sort_cost = lambda row: -(row.get("cents") if row.get("cents") is not None else -1)
-    conversations = [{"id": cid, "name": label_conversation(cid, c["models"], local, cloud), **c}
+    conversations = [{"id": cid, "name": label_conversation(cid, c["models"], local, cloud),
+                      "subagent": is_subagent(cid), **c}
                      for cid, c in by_conv.items()]
     conversations.sort(key=sort_cost)
     event_models = [{"model": model, **values} for model, values in by_model.items()]
@@ -524,6 +540,37 @@ def _event_summaries(events: list[dict], local: dict, cloud: dict,
             "headless": headless, "interactive": interactive,
             "unclassified": unclassified,
             "activity_minutes": {kind: sorted(values) for kind, values in minutes.items()}}
+
+
+RANGE_DAYS = (("day", 0), ("week", 6), ("month", 29))
+
+
+def _range_totals(cookie: str, user_id, deadline: float, errors: list) -> dict:
+    """Cursor's usage value for today and the last 7 and 30 days, from the
+    same dashboard aggregate as the cycle total, each from local midnight."""
+    now_ms = int(time.time() * 1000)
+    midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    out = {}
+    for key, back in RANGE_DAYS:
+        start = int((midnight - timedelta(days=back)).timestamp() * 1000)
+        try:
+            agg = dashboard_request(cookie, "/api/dashboard/get-aggregated-usage-events", "POST",
+                                    {"teamId": 0, "startDate": str(start), "endDate": str(now_ms), "userId": user_id},
+                                    timeout=_request_timeout(deadline, 20))
+        except Exception as exc:
+            errors.append(f"Usage for the last {back + 1} days unavailable ({type(exc).__name__})")
+            continue
+        if not isinstance(agg, dict):
+            continue
+        # A range with no usage comes back as an empty object.
+        empty = not agg
+        out[key] = {"start": start / 1000,
+                    "cents": 0.0 if empty else to_float(agg.get("totalCostCents")),
+                    "input": 0 if empty else to_int(agg.get("totalInputTokens")),
+                    "output": 0 if empty else to_int(agg.get("totalOutputTokens")),
+                    "cache_write": 0 if empty else to_int(agg.get("totalCacheWriteTokens")),
+                    "cache_read": 0 if empty else to_int(agg.get("totalCacheReadTokens"))}
+    return out
 
 
 def fetch_cycle(force: bool = False) -> dict:
@@ -659,6 +706,7 @@ def _fetch_cycle(force: bool = False) -> dict:
         "agg_output": to_int(agg.get("totalOutputTokens")),
         "agg_cache_write": to_int(agg.get("totalCacheWriteTokens")),
         "agg_cache_read": to_int(agg.get("totalCacheReadTokens")),
+        "range_totals": _range_totals(cookie, user_id, deadline, errors) if user_id else {},
     }
     report["findings"] = build_findings(report)
     if _current_cursor_identity() != initial_identity:

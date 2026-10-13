@@ -42,6 +42,7 @@ const state = {
   overview: null,
   overviewError: null,
   overviewFetching: false,
+  overviewRange: 'cycle',
   priceEditor: false,
   // What the bell badge reflects besides alerts: a waiting update and the
   // engine's own status.
@@ -1460,37 +1461,72 @@ const spanBig = (hours) => spanParts(hours).filter(([n], i, all) => n || all.len
 const hoursShort = (h) => (h >= 1 ? `${Math.round(h)}h` : `${Math.round(h * 60)}m`);
 const tokenSum = (t) => ['input', 'output', 'cache_read', 'cache_write'].reduce((s, k) => s + (t?.[k] || 0), 0);
 
+// The ranges the Overview can show, as the days before today they reach back.
+const OV_RANGES = [['day', 'Today', 0], ['week', '7 days', 6], ['month', '30 days', 29], ['cycle', 'This cycle', null]];
+const rangeOf = (id) => OV_RANGES.find(([key]) => key === id) || OV_RANGES[3];
+
+/** Local midnight `back` days ago, so a range's start holds still all day. */
+function midnight(back) {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - back);
+  return start.getTime() / 1000;
+}
+
 function overviewSince() {
+  const back = rangeOf(state.overviewRange)[2];
+  if (back !== null) return midnight(back);
   const start = state.cycle?.cycle_start ? Date.parse(state.cycle.cycle_start) / 1000 : null;
-  return known(start) ? start : Math.floor(Date.now() / 1000 - 30 * 86400);
+  return known(start) ? start : midnight(29);
 }
 
 async function refreshOverview() {
   if (state.overviewFetching) return;
   state.overviewFetching = true;
+  const since = overviewSince();
+  const range = state.overviewRange;
   try {
-    state.overview = await window.hud.call('overview', { since: overviewSince() });
+    state.overview = { ...await window.hud.call('overview', { since }), range };
     state.overviewError = null;
   } catch (err) {
     state.overviewError = engineMessage(err);
   } finally {
     state.overviewFetching = false;
     renderOverview();
+    // The range changed while the logs were being read.
+    if (since !== overviewSince()) refreshOverview();
   }
 }
 
-/** Value and tokens per provider this cycle, Cursor from its dashboard and
-    Claude and Codex from their local logs. */
+function setOverviewRange(id) {
+  if (id === state.overviewRange) return;
+  state.overviewRange = id;
+  try { localStorage.setItem('overviewRange', id); } catch { /* Remembering the range is a convenience. */ }
+  renderOverview();
+  refreshOverview();
+}
+
+/** Cursor's value and tokens over the shown range, from its dashboard: the
+    cycle total, or its total for a shorter range from the same midnight.
+    Until a refresh brings the range (or after midnight moves it), none. */
+function cursorRow(o) {
+  const cycle = state.cycle;
+  if (!cycle || !known(cycle.total_spend_cents)) return null;
+  const price = CURSOR_PLAN_PRICE[String(cycle.plan || '').toLowerCase()] ?? null;
+  const total = o.range === 'cycle'
+    ? { cents: cycle.total_spend_cents, input: cycle.agg_input, output: cycle.agg_output, cache_read: cycle.agg_cache_read, cache_write: cycle.agg_cache_write }
+    : cycle.range_totals?.[o.range];
+  if (!total || !known(total.cents) || (o.range !== 'cycle' && Math.abs(total.start - o.since) > 60)) return null;
+  return { id: 'cursor', label: 'Cursor', cents: total.cents, price,
+    tokens: { input: total.input, output: total.output, cache_read: total.cache_read, cache_write: total.cache_write } };
+}
+
+/** Value and tokens per provider over the shown range, Cursor from its
+    dashboard and Claude and Codex from their local logs. */
 function overviewProviders(o) {
   const rows = [];
-  const cycle = state.cycle;
-  if (cycle && known(cycle.total_spend_cents)) {
-    rows.push({
-      id: 'cursor', label: 'Cursor', cents: cycle.total_spend_cents,
-      tokens: { input: cycle.agg_input, output: cycle.agg_output, cache_read: cycle.agg_cache_read, cache_write: cycle.agg_cache_write },
-      price: CURSOR_PLAN_PRICE[String(cycle.plan || '').toLowerCase()] ?? null,
-    });
-  }
+  const cursor = cursorRow(o);
+  if (cursor) rows.push(cursor);
   for (const [id, label] of [['claude', 'Claude'], ['codex', 'Codex']]) {
     const p = o.providers?.[id];
     if (!p) continue;
@@ -1502,24 +1538,35 @@ function overviewProviders(o) {
 function overviewHero(o, rows) {
   const total = rows.reduce((s, r) => s + r.cents, 0);
   const tokens = rows.reduce((s, r) => s + tokenSum(r.tokens), 0);
-  const paid = rows.reduce((s, r) => s + (known(r.price) ? r.price : 0), 0);
   const roundCents = Math.round(total);
   const whole = Math.floor(roundCents / 100);
   const cycle = state.cycle;
   const start = o.since;
   const end = cycle?.cycle_end ? Date.parse(cycle.cycle_end) / 1000 : null;
   const dateText = (epoch) => new Date(epoch * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const [range, rangeLabel, back] = rangeOf(o.range);
+  // A shorter range is weighed against its share of a month of subscriptions.
+  const share = range === 'cycle' ? 1 : (back + 1) / 30;
+  const paid = rows.reduce((s, r) => s + (known(r.price) ? r.price : 0), 0) * share;
+  const paidText = `$${Math.round(paid).toLocaleString('en-US')}`;
 
   const split = el('div', { class: 'ov-split' }, rows.map((r) => el('div', { class: 'ov-pc', vars: { '--c': PROVIDER_HUE[r.id], '--pcol': OV_HUE[r.id] } }, [
     el('div', { class: 'ov-pc-h' }, [el('span', { class: 'ov-mk' }, [icon(PROVIDER_GLYPH[r.id], 12)]), r.label]),
     el('div', { class: 'ov-pc-v', text: dollars(r.cents) }),
     el('div', { class: 'ov-pc-t' }, [el('b', { text: compact(tokenSum(r.tokens)) }), ' tokens',
-      known(r.price) && r.price > 0 ? ` · ${(r.cents / 100 / r.price).toFixed(1)}×` : null]),
+      known(r.price) && r.price > 0 ? ` · ${(r.cents / 100 / (r.price * share)).toFixed(1)}×` : null]),
     el('div', { class: 'ov-bar' }, [el('i', { vars: { '--w': `${total ? (r.cents / total) * 100 : 0}%` } })]),
   ])));
 
+  const eyebrow = range === 'cycle'
+    ? (known(end) ? `This cycle · ${dateText(start)} – ${dateText(end)}` : `Since ${dateText(start)}`)
+    : range === 'day' ? `Today · ${new Date().toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}`
+      : `Last ${rangeLabel} · ${dateText(start)} – ${dateText(Date.now() / 1000)}`;
+  const paidLabel = range === 'cycle' ? ['for ', el('b', { text: `${paidText}/mo` }), ' in subscriptions']
+    : ['for ', el('b', { text: paidText }), range === 'day' ? ' of subscriptions today' : ` of subscriptions over ${rangeLabel}`];
+
   let progress = null;
-  if (known(end) && end > start) {
+  if (range === 'cycle' && known(end) && end > start) {
     const now = Date.now() / 1000;
     const frac = Math.min(1, Math.max(0, (now - start) / (end - start)));
     const day = Math.max(1, Math.ceil((now - start) / 86400));
@@ -1532,7 +1579,7 @@ function overviewHero(o, rows) {
   }
 
   return el('div', { class: 'card ov-hero' }, [
-    el('div', { class: 'ov-eyebrow', text: known(end) ? `This cycle · ${dateText(start)} – ${dateText(end)}` : `Since ${dateText(start)}` }),
+    el('div', { class: 'ov-eyebrow', text: eyebrow }),
     el('div', { class: 'ov-hero-row' }, [
       el('div', {}, [
         el('div', { class: 'ov-big' }, [`$${whole.toLocaleString('en-US')}`, el('small', { text: `.${String(roundCents % 100).padStart(2, '0')}` })]),
@@ -1540,7 +1587,7 @@ function overviewHero(o, rows) {
       ]),
       el('button', { class: 'ov-roi', type: 'button', title: 'Edit plan prices', onclick: () => { state.priceEditor = !state.priceEditor; renderOverview(); } }, [
         el('div', { class: 'ov-x', text: paid > 0 ? `${(total / 100 / paid).toFixed(1)}×` : '—' }),
-        el('div', { class: 'ov-l' }, ['for ', el('b', { text: `$${paid.toLocaleString('en-US')}/mo` }), ' in subscriptions']),
+        el('div', { class: 'ov-l' }, paidLabel),
       ]),
     ]),
     state.priceEditor ? priceEditor(o) : null,
@@ -1620,8 +1667,47 @@ function overviewTime(o) {
   ]);
 }
 
-/** Your time at the computer, one bar per day of the cycle. */
+const hourName = (h) => `${h % 12 || 12}${h < 12 ? 'a' : 'p'}`;
+
+/** Today hour by hour: minutes at the computer in each hour. */
+function overviewDeskToday(o) {
+  const hours = o.hours || [];
+  const now = new Date().getHours();
+  const total = o.human_hours || 0;
+  const best = hours.reduce((a, h) => (h.you > (a?.you || 0) ? h : a), null);
+  const minutesText = (h) => `${Math.round(h * 60)}m`;
+  const plot = el('div', { class: 'ov-desk-plot' }, hours.map((h) => el('div', {
+    class: `ov-dcol${h.hour > now ? ' is-later' : ''}`,
+    title: `${hourName(h.hour)}–${hourName((h.hour + 1) % 24)} · ${spanText(h.you)}`,
+  }, [
+    el('div', { class: `ov-dbar${h === best ? ' is-best' : ''}`, vars: { '--h': `${Math.min(1, h.you) * 100}%`, '--o': (0.35 + 0.65 * Math.min(1, h.you)).toFixed(2) } }, [
+      h.you >= 0.25 ? el('span', { class: 'ov-dval', text: minutesText(h.you) }) : null,
+    ]),
+  ])));
+  const axis = el('div', { class: 'ov-desk-x' }, hours.map((h) => el('span', { text: h.hour % 6 === 0 ? hourName(h.hour) : '' })));
+  const stat = (label, value, color) => el('div', { class: `ov-dstat${color ? ' is-hi' : ''}`, vars: color ? { '--c': color } : {} }, [
+    el('span', {}, [el('i'), label]), el('b', { text: value }),
+  ]);
+  const first = o.first_seen ? new Date(o.first_seen * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '—';
+  return el('div', { class: 'card ov-chart' }, [
+    el('div', { class: 'ov-head' }, [
+      el('h2', { text: 'Your time at the computer' }),
+      el('span', { class: 'ov-muted' }, [el('b', { text: spanText(total) }), ' today']),
+    ]),
+    el('div', { class: 'ov-desk-stats' }, [
+      stat('At the computer', spanText(total), OV_HUE.you),
+      stat('Sittings', String(o.sittings || 0)),
+      stat('Longest sitting', o.longest_sitting ? spanText(o.longest_sitting.hours) : '—'),
+      stat('First here', first),
+    ]),
+    plot,
+    axis,
+  ]);
+}
+
+/** Your time at the computer, one bar per day of the range. */
 function overviewDesk(o) {
+  if (o.range === 'day') return overviewDeskToday(o);
   const days = o.desk_days || [];
   if (!days.length) return null;
   const total = days.reduce((s, d) => s + d.hours, 0);
@@ -1650,7 +1736,7 @@ function overviewDesk(o) {
   ]);
   const axis = el('div', { class: 'ov-desk-x' }, days.map((d, i) => el('span', {
     class: i === days.length - 1 ? 'is-today' : null,
-    text: i === days.length - 1 ? 'Today' : i % step === 0 && days.length - 1 - i >= 2 ? dayName(d.date, { month: 'short', day: 'numeric' }) : '',
+    text: i === days.length - 1 ? 'Today' : i % step === 0 && days.length - 1 - i >= step ? dayName(d.date, { month: 'short', day: 'numeric' }) : '',
   })));
   const stat = (label, value, color) => el('div', { class: `ov-dstat${color ? ' is-hi' : ''}`, vars: color ? { '--c': color } : {} }, [
     el('span', {}, [el('i'), label]), el('b', { text: value }),
@@ -1678,37 +1764,50 @@ function overviewTiles(o) {
   const tile = (label, value, note) => el('div', { class: 'card ov-tile' }, [
     el('div', { class: 'ov-eyebrow', text: label }), el('div', { class: 'ov-tv', text: value }), el('div', { class: 'ov-tn' }, note),
   ]);
-  const cycle = state.cycle;
+  // Cursor chats active in the range: the ones you started, and the
+  // subagents (Grok Bot's automations among them) that they spawned.
+  const convs = (state.cycle?.conversations || []).filter((c) => o.range === 'cycle' || !c.last_at || c.last_at >= o.since);
+  const subs = convs.filter((c) => c.subagent).length;
   return el('div', { class: 'ov-tiles' }, [
     tile('Agents', String(agents), [el('b', { text: String(sessions) }), ' sessions · ', el('b', { text: String(agents - sessions) }), ' sub']),
     tile('Tool calls', compact(o.tool_calls), agentHours > 0 ? [el('b', { text: `~${Math.round(o.tool_calls / agentHours)}` }), ' per agent-hour'] : []),
     tile('Your prompts', String(o.prompts), o.prompts ? [el('b', { text: `~${Math.round(o.tool_calls / o.prompts)}` }), ' tool calls each'] : []),
-    cycle?.conversations ? tile('Cursor chats', String(cycle.conversations.length), known(cycle.headless?.n) ? [el('b', { text: compact(cycle.headless.n) }), ' background runs'] : [])
+    convs.length ? tile('Cursor chats', String(convs.length - subs), subs ? [el('b', { text: compact(subs) }), ' subagents'] : [])
       : tile('Sittings', String(o.sittings), o.longest_sitting ? ['longest ', el('b', { text: spanText(o.longest_sitting.hours) })] : []),
   ]);
 }
 
+/** Agent hours stacked by provider: per hour today, per day otherwise. */
 function overviewDays(o) {
-  const days = o.days || [];
+  const today = o.range === 'day';
+  const days = today ? o.hours || [] : o.days || [];
   const lanes = [['codex', 'Codex', OV_HUE.codex], ['claude', 'Claude', OV_HUE.claude], ['cursor', 'Cursor', OV_HUE.cursor]]
     .filter(([id]) => days.some((d) => (d[id] || 0) >= 0.02));
   const sumDay = (d) => lanes.reduce((s, [id]) => s + (d[id] || 0), 0);
   const top = Math.max(1, ...days.map(sumDay));
   const scale = Math.ceil(top / 4) * 4;
+  // Long ranges label a column a week, and drop the per-bar values that would collide.
+  const step = today ? 6 : days.length > 10 ? 7 : 1;
+  const crowded = days.length > 14;
+  const label = (d, i) => {
+    if (today) return d.hour % step === 0 ? hourName(d.hour) : '';
+    if (i === days.length - 1) return 'Today';
+    if (step === 1) return WEEKDAYS[(new Date(`${d.date}T12:00`).getDay() + 6) % 7];
+    return i % step === 0 && days.length - 1 - i >= step ? new Date(`${d.date}T12:00`).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '';
+  };
   const cols = days.map((d, i) => {
     const total = sumDay(d);
-    return el('div', { class: 'ov-col' }, [
-      total >= 0.05 ? el('span', { class: 'ov-col-v', text: hoursShort(total) }) : null,
+    return el('div', { class: 'ov-col', title: `${today ? hourName(d.hour) : d.date} · ${spanText(total)} of agent time` }, [
+      total >= 0.05 && !crowded ? el('span', { class: 'ov-col-v', text: hoursShort(total) }) : null,
       el('div', { class: 'ov-col-bar', vars: { '--h': `${(total / scale) * 100}%` } },
         lanes.map(([id, , c]) => ((d[id] || 0) >= 0.02 ? el('i', { vars: { '--f': d[id] / total, '--c': c } }) : null))),
-      el('span', { class: `ov-col-x${i === days.length - 1 ? ' is-today' : ''}`,
-        text: i === days.length - 1 ? 'Today' : WEEKDAYS[(new Date(`${d.date}T12:00`).getDay() + 6) % 7] }),
+      el('span', { class: `ov-col-x${!today && i === days.length - 1 ? ' is-today' : ''}`, text: label(d, i) }),
     ]);
   });
   return el('div', { class: 'card ov-chart' }, [
-    el('div', { class: 'ov-head' }, [el('h2', { text: 'Agent hours per day' }), el('div', { class: 'ov-legend' },
-      [...lanes].reverse().map(([, label, c]) => el('span', {}, [el('i', { class: 'ov-sw', vars: { '--c': c } }), label])))]),
-    el('div', { class: 'ov-bars' }, cols),
+    el('div', { class: 'ov-head' }, [el('h2', { text: today ? 'Agent hours by hour' : 'Agent hours per day' }), el('div', { class: 'ov-legend' },
+      [...lanes].reverse().map(([, name, c]) => el('span', {}, [el('i', { class: 'ov-sw', vars: { '--c': c } }), name])))]),
+    el('div', { class: `ov-bars${crowded || today ? ' is-dense' : ''}` }, cols),
   ]);
 }
 
@@ -1759,22 +1858,43 @@ function overviewMix(rows) {
   ]);
 }
 
+function overviewRanges(loading) {
+  return el('div', { class: 'ov-ranges' }, [
+    el('div', { class: 'filter-chips is-quiet', role: 'radiogroup', 'aria-label': 'Range' }, OV_RANGES.map(([id, label]) => el('button', {
+      type: 'button', class: 'filter-chip', role: 'radio', 'aria-checked': String(id === state.overviewRange), text: label,
+      onclick: () => setOverviewRange(id),
+    }))),
+    loading ? el('span', { class: 'ov-muted', text: 'Reading your agent logs…' }) : null,
+  ]);
+}
+
 function renderOverview() {
   const host = $('overviewBody');
   const o = state.overview;
   if (!o) {
-    host.replaceChildren(el('div', { class: 'ov-loading', text: state.overviewError || 'Reading your agent logs…' }));
+    host.replaceChildren(overviewRanges(false), el('div', { class: 'ov-loading', text: state.overviewError || 'Reading your agent logs…' }));
     return;
   }
+  // Until the chosen range arrives, the last one stays up, dimmed.
+  const stale = o.since !== overviewSince();
   const rows = overviewProviders(o);
-  host.replaceChildren(el('div', { class: 'ov' }, [
+  const unpriced = ['claude', 'codex'].reduce((s, id) => s + (o.providers?.[id]?.unpriced_requests || 0), 0);
+  const heat = o.range === 'day' ? null : overviewHeat(o);
+  // Cursor's request times are fetched for this cycle only.
+  const cycleStart = state.cycle?.cycle_start ? Date.parse(state.cycle.cycle_start) / 1000 : null;
+  const before = known(cycleStart) && o.since < cycleStart - 60
+    ? ` Cursor's request times start ${new Date(cycleStart * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' })}, when this cycle began; before then, your time and agent time are Claude and Codex only.` : '';
+  host.replaceChildren(overviewRanges(stale), el('div', { class: `ov${stale ? ' is-stale' : ''}` }, [
     overviewHero(o, rows),
     overviewTime(o),
     overviewDesk(o),
     overviewTiles(o),
-    el('div', { class: 'ov-two' }, [overviewDays(o), overviewHeat(o)]),
+    heat ? el('div', { class: 'ov-two' }, [overviewDays(o), heat]) : overviewDays(o),
     el('div', { class: 'ov-two' }, [overviewTools(o), overviewMix(rows)]),
-    el('div', { class: 'ov-foot', text: 'Values are API-price equivalents: Cursor from its dashboard, Claude Code and Codex estimated from local logs. Your time is counted from your Claude and Codex prompts and Cursor\'s foreground agent requests.' }),
+    el('div', { class: 'ov-foot', text: 'Values are API-price equivalents: Cursor from its dashboard, Claude Code and Codex priced from local logs.'
+      + (unpriced ? ` ${unpriced.toLocaleString('en-US')} requests used a model with no published price and count as $0.` : '')
+      + ' Your time is counted from the Claude and Codex prompts you typed and the minutes your own Cursor and Grok Bot chats were working;'
+      + ' subagents, automations and background runs are agent time only.' + before }),
   ]));
 }
 
@@ -2055,6 +2175,10 @@ async function boot() {
     if (typeof saved.pinned === 'string') state.pinned = saved.pinned;
     if (['active','latest'].includes(saved.follow)) state.sessionFollow = saved.follow;
   } catch { /* Invalid preference falls back to Auto. */ }
+  try {
+    const range = localStorage.getItem('overviewRange');
+    if (OV_RANGES.some(([id]) => id === range)) state.overviewRange = range;
+  } catch { /* The Overview opens on this cycle. */ }
   // Codex is followed through a Windows accessibility helper; Claude Code
   // reports its own open session through the status line on any platform.
   state.activeChatSupported = platform === 'win32';

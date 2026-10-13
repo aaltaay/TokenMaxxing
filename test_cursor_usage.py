@@ -51,6 +51,32 @@ class NumericIntegrityTests(unittest.TestCase):
         self.assertIsNone(result["event_models"][0]["in"])
         self.assertIsNone(result["event_models"][0]["out"])
 
+    def test_subagent_requests_are_agent_minutes_not_yours(self):
+        chat = {"model": "grok-bot-default", "timestamp": "1791900000000", "isHeadless": False,
+                "conversationId": "c1", "tokenUsage": {"totalCents": 1}}
+        sub = {"model": "grok-bot-automation", "timestamp": "1791900600000", "isHeadless": False,
+               "conversationId": "sand-subagent-1", "tokenUsage": {"totalCents": 1}}
+        result = cu._event_summaries([chat, sub], {}, {}, [])
+        self.assertEqual(result["activity_minutes"], {"interactive": [1791900000], "headless": [], "subagent": [1791900600]})
+        flags = {c["id"]: (c["subagent"], c["last_at"]) for c in result["conversations"]}
+        self.assertEqual(flags, {"c1": (False, 1791900000), "sand-subagent-1": (True, 1791900600)})
+
+    def test_range_totals_come_from_the_dashboard_aggregate(self):
+        replies = [{"totalCostCents": "250.5", "totalInputTokens": "10", "totalOutputTokens": "2",
+                    "totalCacheWriteTokens": "3", "totalCacheReadTokens": "40", "aggregations": []},
+                   {}, RuntimeError("down")]
+        with patch.object(cu, "dashboard_request", side_effect=replies) as request:
+            errors = []
+            totals = cu._range_totals("cookie", 7, time.monotonic() + 60, errors)
+        self.assertEqual(totals["day"]["cents"], 250.5)
+        self.assertEqual((totals["day"]["input"], totals["day"]["cache_read"]), (10, 40))
+        # No usage in a range is an empty reply, not a missing one.
+        self.assertEqual((totals["week"]["cents"], totals["week"]["output"]), (0.0, 0))
+        self.assertNotIn("month", totals)
+        self.assertEqual(len(errors), 1)
+        starts = [int(call.args[3]["startDate"]) for call in request.call_args_list]
+        self.assertEqual([round((starts[0] - s) / 86400000) for s in starts], [0, 6, 29])
+
     def test_missing_headless_flag_is_not_classified_as_interactive(self):
         result = cu._event_summaries([{"model": "a", "tokenUsage": {"totalCents": 1}}], {}, {}, [])
         self.assertIsNone(result["interactive"]["n"])
