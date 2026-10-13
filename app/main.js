@@ -14,8 +14,15 @@ const { isReleaseLink } = require('./release-notes');
 const { createNotesSource } = require('./release-notes-source');
 const { createWhatsNew } = require('./whats-new');
 const { ActiveChat } = require('./active-chat');
+const { FocusTracker } = require('./focus');
 const activeChat = new ActiveChat({script: app.isPackaged
   ? path.join(process.resourcesPath, 'active-chat.ps1') : path.join(__dirname, 'active-chat.ps1')});
+// Time an AI tool is the window in front while the user is active. Spans wait
+// in the tracker while the engine is down or restarting and go on the next flush.
+const focus = new FocusTracker({
+  script: app.isPackaged ? path.join(process.resourcesPath, 'focus.ps1') : path.join(__dirname, 'focus.ps1'),
+  send: args => (bridge?.ready ? bridge.call('focus_record', args, 15000) : Promise.reject(new Error('engine not ready'))),
+});
 let updates = null;
 let whatsNew = null;
 let sms = null;
@@ -170,6 +177,8 @@ class Bridge {
         this.hello = frame.data;
         engineState = { ready: true, hello: frame.data, fatal: null };
         send('engine:ready', frame.data);
+        // Once there is somewhere to record into; it then outlives engine restarts.
+        focus.start();
         continue;
       }
       const slot = this.pending.get(frame.id);
@@ -243,12 +252,19 @@ function fatal(message) {
 
 // ── window ────────────────────────────────────────────────────────────────
 
+// The release this copy is, for the title: v051, or dev from a source checkout
+// (whose package.json stays 0.0.0-dev).
+function versionInfo() {
+  const version = app.getVersion();
+  return { version, tag: !app.isPackaged || /^0\.0\.0(?:-|$)/.test(version) ? 'dev' : displayTag(version) };
+}
+
 function createWindow() {
   win = new BrowserWindow({
     ...WIN,
     show: process.platform === 'win32',
     backgroundColor: '#0c0c0f',
-    title: 'TOKENMAXXING',
+    title: `TOKENMAXXING ${versionInfo().tag}`,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
     titleBarOverlay:
       process.platform === 'darwin'
@@ -265,6 +281,9 @@ function createWindow() {
   });
 
   win.setAlwaysOnTop(true, 'floating');
+  // index.html's <title> is the bare name; keep the versioned one until the
+  // renderer sets its own, which carries the same version.
+  win.on('page-title-updated', (event, title) => { if (title === 'TOKENMAXXING') event.preventDefault(); });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   win.once('ready-to-show', () => win.show());
   win.webContents.on('did-finish-load', () => {
@@ -301,15 +320,15 @@ ipcMain.handle('engine:call', async (_event, cmd, args) => {
   if (!bridge) throw new Error('engine not started');
   if (cmd === 'sessions') args = {...args, active_title: activeChat.currentTitle(args?.provider === 'claude' ? 'claude' : 'codex')};
   // The cycle fetch pages the dashboard and can legitimately run long. The
-  // overview reads only what the agent logs gained, except on a first read
-  // of every log (gigabytes, a minute or two), which the renderer shows
-  // progress for; giving up on that sooner would only throw the answer away.
-  const timeout = cmd === 'cycle' ? 180000 : cmd === 'overview' ? 600000 : cmd === 'providers' ? 45000 : 30000;
+  // overview is a query of the local ledger (the logs are read in the
+  // background), so it gets the ordinary limit.
+  const timeout = cmd === 'cycle' ? 180000 : cmd === 'providers' ? 45000 : 30000;
   return bridge.call(cmd, args || {}, timeout);
 });
 
 // The renderer asks for this on load; whoever wins the race, it still boots.
 ipcMain.handle('engine:status', () => engineState);
+ipcMain.handle('app:version', () => versionInfo());
 ipcMain.handle('updates:status', () => updates?.view);
 // Answers at once; the check, and any download it starts, report through updates:status.
 ipcMain.handle('updates:check', () => { void updates?.check('manual'); return updates?.view; });
@@ -401,7 +420,8 @@ function createUpdates({ logger, notesSource }) {
     setProgress: value => { if (win && !win.isDestroyed()) win.setProgressBar(value); },
     // Flashes the taskbar button until the window is focused; the bell carries the buttons.
     attention: () => { if (win && !win.isDestroyed() && !win.isFocused()) win.flashFrame(true); },
-    stopEngine: () => (bridge ? bridge.stopAndWait() : Promise.resolve(true)),
+    // The last minute of focus time goes to the engine before it stops for the installer.
+    stopEngine: async () => { await focus.settle(); return bridge ? bridge.stopAndWait() : true; },
     restartEngine: async () => startBridge(),
   });
 }
@@ -445,7 +465,19 @@ if (!app.requestSingleInstanceLock()) {
     if (process.platform !== 'darwin') app.quit();
   });
 
-  app.on('before-quit', () => {
+  let focusHandedOver = false;
+  app.on('before-quit', (event) => {
+    // Quitting waits, once and for at most a few seconds, for the last focus
+    // spans to reach the engine. With the engine already stopped (an update
+    // install) there is nothing to wait for, so the installer is never held up.
+    if (!focusHandedOver && bridge?.ready && focus.pending()) {
+      focusHandedOver = true;
+      event.preventDefault();
+      focus.stop().finally(() => app.quit());
+      return;
+    }
+    focusHandedOver = true;
+    void focus.stop();
     activeChat.stop();
     updates?.stop();
     clearInterval(alertPoll);
