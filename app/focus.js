@@ -211,11 +211,13 @@ class FocusTracker {
     return this.flushing;
   }
 
-  /** Flushes after any flush already under way, giving up after `timeoutMs`. */
+  /** Flushes after any flush already under way, giving up after `timeoutMs`.
+      The timer stays referenced: it is cleared the moment either side wins,
+      and an unreferenced one lets the process end before a stuck send gives up. */
   settle(timeoutMs = SETTLE_MS) {
     const flushed = (this.flushing || Promise.resolve()).then(() => this.flush());
     let timer;
-    const late = new Promise(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); timer.unref?.(); });
+    const late = new Promise(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); });
     return Promise.race([flushed, late]).finally(() => clearTimeout(timer));
   }
 
