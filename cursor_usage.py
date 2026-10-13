@@ -19,6 +19,8 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import ledger
+
 CACHE_TTL_S = 180
 CYCLE_FETCH_MAX_SECONDS = 150
 SCHEMA_VERSION = 2
@@ -27,8 +29,6 @@ EVENT_FETCH_MAX_PAGES = 500
 # A page that fails (a dropped TLS connection, say) is asked for again before
 # the fetch gives up on the rest of the range.
 EVENT_PAGE_ATTEMPTS = 3
-# Cursor activity minutes are kept this long, past any range the Overview shows.
-ACTIVITY_KEEP_S = 40 * 86400
 ACTIVITY_KINDS = ("interactive", "headless", "subagent")
 DASHBOARD = "https://cursor.com"
 API2 = "https://api2.cursor.sh"
@@ -55,10 +55,6 @@ def hud_dir() -> Path:
 
 def cache_path() -> Path:
     return hud_dir() / "cycle-cache.json"
-
-
-def activity_path() -> Path:
-    return hud_dir() / "cursor-activity.json"
 
 
 def connect(db: Path | None = None) -> sqlite3.Connection:
@@ -490,6 +486,13 @@ def fetch_events(cookie: str, query: dict, max_seconds: float = EVENT_FETCH_MAX_
     return result
 
 
+def event_kind(ev: dict) -> str:
+    """Who made a request: a chat's subagent works on its own, a headless run
+    has no one at the editor, and the rest are you."""
+    return ("subagent" if is_subagent(ev.get("conversationId")) else
+            "headless" if ev.get("isHeadless") is True else "interactive")
+
+
 def event_minutes(events: list[dict]) -> dict[str, set]:
     """The minutes requests happened in, for time-at-the-keyboard and agent time.
     Subagents a chat spawns work on their own: agent time, not yours."""
@@ -497,9 +500,7 @@ def event_minutes(events: list[dict]) -> dict[str, set]:
     for ev in events:
         ts = iso_to_ms(ev.get("timestamp"))
         if ts is not None:
-            kind = ("subagent" if is_subagent(ev.get("conversationId")) else
-                    "headless" if ev.get("isHeadless") is True else "interactive")
-            minutes[kind].add(int(ts // 60000) * 60)
+            minutes[event_kind(ev)].add(int(ts // 60000) * 60)
     return minutes
 
 
@@ -517,17 +518,6 @@ def _minute_lists(value) -> dict | None:
     return out
 
 
-def _stored_minutes(owner: str) -> dict | None:
-    """The activity store's minutes, if it belongs to this account."""
-    try:
-        store = json.loads(activity_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(store, dict) or store.get("schema_version") != 1 or store.get("email") != owner:
-        return None
-    return _minute_lists(store.get("minutes"))
-
-
 def _snapshot_minutes(owner: str) -> dict | None:
     """The minutes in the last Cursor snapshot, if it belongs to this account."""
     try:
@@ -539,38 +529,90 @@ def _snapshot_minutes(owner: str) -> dict | None:
     return _minute_lists(report.get("activity_minutes"))
 
 
-def remember_activity(email, events: list[dict], now: float | None = None) -> dict | None:
-    """Fold the minutes these events happened in into the local activity store.
-    Every fetched event is a request Cursor really logged, so even the pages of
-    a fetch that failed partway add true minutes. A failed refresh never takes
-    minutes away, and they outlive the billing cycle that logged them."""
+# Fields a dashboard event might carry its own id in.
+EVENT_ID_FIELDS = ("id", "requestId", "usageEventId", "eventId")
+
+
+def event_key(owner: str, ev: dict) -> str:
+    """A dashboard event's identity, the same every time it is fetched: its own
+    id when it carries one, else when it ran, in which chat, on which model.
+    Its tokens and value stay out of it, so a later correction of either is
+    never a second request."""
+    for field in EVENT_ID_FIELDS:
+        value = ev.get(field)
+        if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value):
+            return f"{owner}|id|{value}"
+    ident = [iso_to_ms(ev.get("timestamp")), ev.get("model"), ev.get("conversationId"),
+             ev.get("cloudAgentId"), ev.get("isHeadless")]
+    return f"{owner}|" + hashlib.sha256(json.dumps(ident, default=str).encode()).hexdigest()[:32]
+
+
+def _event_rows(owner: str, events: list[dict]) -> list[tuple]:
+    rows = []
+    for ev in events:
+        ts = iso_to_ms(ev.get("timestamp")) if isinstance(ev, dict) else None
+        if ts is None:
+            continue
+        tu = ev.get("tokenUsage") if isinstance(ev.get("tokenUsage"), dict) else {}
+        model = ev.get("model")
+        rows.append((event_key(owner, ev), ts / 1000, _event_cents(ev), to_int(tu.get("inputTokens")),
+                     to_int(tu.get("outputTokens")), to_int(tu.get("cacheReadTokens")),
+                     to_int(tu.get("cacheWriteTokens")), event_kind(ev), model if isinstance(model, str) else None))
+    return rows
+
+
+def fetch_coverage(events: list[dict], start_ms, fetched_at: float, complete: bool):
+    """The stretch of time a fetch saw every event of, or None. A complete
+    fetch saw the whole range up to the moment it began. One cut short saw
+    a stretch too when its pages came newest first: everything from its
+    oldest event up to that moment."""
+    if complete:
+        return (start_ms / 1000, fetched_at) if start_ms is not None else None
+    times = [iso_to_ms(ev.get("timestamp")) for ev in events]
+    if len(times) < 2 or None in times or times[0] <= times[-1] or any(a < b for a, b in zip(times, times[1:])):
+        return None
+    # Events logged in the same millisecond as the oldest may sit on the next page.
+    return (times[-1] / 1000 + 0.001, fetched_at)
+
+
+def remember_activity(email, events: list[dict], covered=None) -> dict | None:
+    """Keep these dashboard events in the ledger, once each, with the minutes
+    they happened in and the stretch the fetch covered (see fetch_coverage).
+    Every fetched event is a request Cursor really logged, so even the pages
+    of a fetch that failed partway add true minutes and events. A failed
+    refresh never takes anything away, and nothing is forgotten when a
+    billing cycle ends."""
     owner = _normalized_email(email)
     if not owner:
         return None
-    now = time.time() if now is None else now
-    known = _stored_minutes(owner) or _snapshot_minutes(owner) or {}
+    led = ledger.default()
     fresh = event_minutes(events)
-    cutoff = now - ACTIVITY_KEEP_S
-    minutes = {kind: sorted(t for t in set(known.get(kind) or ()) | fresh[kind] if t >= cutoff)
-               for kind in ACTIVITY_KINDS}
-    path = activity_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pending = path.with_name(path.name + ".tmp")
-    pending.write_text(json.dumps({"schema_version": 1, "email": owner, "minutes": minutes}), encoding="utf-8")
-    pending.replace(path)
-    return minutes
+    if led.cursor_minutes(owner) is None:
+        # Before the ledger had minutes for this account, the last snapshot held them.
+        for kind, times in (_snapshot_minutes(owner) or {}).items():
+            fresh[kind].update(times)
+    led.record_cursor(owner, _event_rows(owner, events),
+                      [(kind, t) for kind in ACTIVITY_KINDS for t in fresh[kind]], covered)
+    return led.cursor_minutes(owner)
 
 
-def read_activity_minutes() -> dict | None:
-    """Cursor's activity minutes for the account signed in now, from the local
-    store (or, before the first refresh fills it, the last snapshot)."""
+def current_account() -> str | None:
+    """The Cursor account signed in now, by its normalized email; None when
+    signed out or unreadable."""
     try:
         cookie, email = _current_cursor_identity()
     except (OSError, sqlite3.Error):
         return None
-    if not cookie or not email:
+    return email if cookie and email else None
+
+
+def read_activity_minutes() -> dict | None:
+    """Cursor's activity minutes for the account signed in now, from the
+    ledger (or, before the first refresh fills it, the last snapshot)."""
+    owner = current_account()
+    if not owner:
         return None
-    return _stored_minutes(email) or _snapshot_minutes(email)
+    return ledger.default().cursor_minutes(owner) or _snapshot_minutes(owner)
 
 
 def _event_summaries(events: list[dict], local: dict, cloud: dict,
@@ -806,7 +848,12 @@ def _fetch_cycle(force: bool = False) -> dict:
     report["findings"] = build_findings(report)
     if _current_cursor_identity() != initial_identity:
         raise RuntimeError("Cursor account changed during refresh; retry to load the current account.")
-    remember_activity(email, event_result["events"])
+    try:
+        remember_activity(email, event_result["events"],
+                          fetch_coverage(event_result["events"], start_ms, fetched_at, event_result["events_complete"]))
+    except (OSError, sqlite3.Error, ledger.LedgerError) as exc:
+        # The report stands on its own; only keeping its events for later failed.
+        sys.stderr.write(f"Cursor events not kept in the ledger ({type(exc).__name__})\n")
     path.parent.mkdir(parents=True, exist_ok=True)
     pending = path.with_name(path.name + ".tmp")
     pending.write_text(json.dumps(report, allow_nan=False), encoding="utf-8")
